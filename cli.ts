@@ -15,6 +15,8 @@ import { startServer } from './server/main.ts'
 import { LOOPBACK } from './server/gate.ts'
 import { buildDiffSource } from './server/diffSource.ts'
 import { openUrl } from './server/open.ts'
+import { postReply } from './server/reply.ts'
+import type { ReplyToken } from './server/reply.ts'
 
 function parsePort(value: string): number {
   const port = /^\d+$/.test(value) ? Number(value) : NaN
@@ -53,6 +55,16 @@ const program = new Command()
     '--send <command>',
     'add a Send button that pipes the comment to this shell command (default: $SKEPSIS_SEND)',
   )
+  .option(
+    '--replies',
+    'let the agent --send delivers to answer comments in the page (each comment says how)',
+  )
+  .option(
+    '--reply <comment-id>',
+    'instead of serving a review, answer a sent comment with the text argument (- reads stdin)',
+  )
+  .option('--server <url>', 'with --reply: the skepsis server, from the comment')
+  .option('--token <token>', 'with --reply: the reply token, from the comment')
   .argument('[files...]', 'Limit diff to these paths (passed through to jj/git)')
   .addHelpText(
     'after',
@@ -64,7 +76,9 @@ const program = new Command()
       'working directory (-C), with the comment as one JSON object on stdin (its `prompt`\n' +
       'field has it all as plain text). Exit 0 means delivered; anything else,\n' +
       'or taking over 10 s, is an error, and stderr is shown.\n' +
-      'See the README for the fields and recipes.',
+      'See the README for the fields and recipes.\n\n' +
+      'With --replies too, each comment ends with a `skepsis --reply` command\n' +
+      'the agent runs to answer it in the page, under the comment.',
   )
   .parse()
 
@@ -80,6 +94,44 @@ const hostname = opts.host
 // The flag wins over the environment, and an empty value means the system
 // opener.
 const openCmd = (opts.openCmd ?? process.env['SKEPSIS_OPEN']) || null
+
+async function reply(id: string): Promise<never> {
+  const conflicting = (
+    [
+      ['revisions', '-r'],
+      ['from', '-f'],
+      ['to', '-t'],
+      ['interdiff', '--interdiff'],
+      ['send', '--send'],
+      ['replies', '--replies'],
+      ['cwd', '-C'],
+    ] as const
+  ).filter(([key]) => opts[key] !== undefined)
+  if (conflicting.length)
+    fail(`--reply can't be used with ${conflicting.map(([, flag]) => flag).join(', ')}`)
+  if (opts.server === undefined || opts.token === undefined)
+    fail('--reply needs --server and --token, from the comment')
+  if (files.length !== 1)
+    fail('--reply takes the reply text as one argument, or - to read it from stdin')
+  let text = files[0]!
+  if (text === '-') {
+    const chunks: Buffer[] = []
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
+    text = Buffer.concat(chunks).toString('utf8').trimEnd()
+  }
+  if (!text.trim()) fail('The reply is empty')
+  const r = await postReply(
+    { server: opts.server, token: opts.token as ReplyToken },
+    id,
+    text,
+  )
+  if ('kind' in r) fail(r.message)
+  process.exit(0)
+}
+
+if (opts.reply !== undefined) await reply(opts.reply)
+if (opts.server !== undefined || opts.token !== undefined)
+  fail('--server and --token only go with --reply')
 
 // Changing the process's own directory, rather than passing the directory
 // around, keeps everything that depends on it in agreement: VCS detection,
@@ -101,6 +153,7 @@ if (opts.cwd !== undefined) {
 
 // The flag wins over the environment, and an empty value turns sending off.
 const send = (opts.send ?? process.env['SKEPSIS_SEND']) || null
+if (opts.replies && !send) fail('--replies needs --send (or SKEPSIS_SEND)')
 if (send && !LOOPBACK.has(hostname === '::1' ? '[::1]' : hostname)) {
   fail(
     `--send runs a command on request from the page, so it needs a loopback\n` +
@@ -160,7 +213,15 @@ const { port: apiPort, token } = await startServer({
   hostname,
   port: opts.dev ? undefined : opts.port,
   poll: opts.poll,
-  send,
+  send: send
+    ? {
+        command: send,
+        // The agent runs this to reply, so it names the same node and script
+        // this run uses: skepsis may not be on its PATH (npx), or may be a
+        // different version.
+        replies: opts.replies ? { skepsis: [process.execPath, process.argv[1]!] } : null,
+      }
+    : null,
 }).catch((err: Error) => {
   console.error(err.message)
   return cleanup(1)

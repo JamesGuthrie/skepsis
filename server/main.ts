@@ -7,6 +7,7 @@
  */
 
 import { Hono } from 'hono'
+import { createMiddleware } from 'hono/factory'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { zValidator } from '@hono/zod-validator'
@@ -24,6 +25,9 @@ import { loadTheme, saveTheme, themeBootScript } from './settings.ts'
 import { newToken, sendGate, tokenMatches } from './gate.ts'
 import { buildPayload, runSend } from './send.ts'
 import type { SendResult } from './send.ts'
+import { Threads } from './threads.ts'
+
+import type { ReplyToken } from './reply.ts'
 import {
   viewedRequestSchema,
   viewedDeleteSchema,
@@ -31,9 +35,12 @@ import {
   commentRequestSchema,
   commentDeleteSchema,
   sendRequestSchema,
+  followUpRequestSchema,
+  replyRequestSchema,
   fileContentsQuerySchema,
   themeRequestSchema,
   TOKEN_HEADER,
+  REPLY_TOKEN_HEADER,
 } from '../shared/types.ts'
 import type {
   DiffHashResponse,
@@ -42,7 +49,18 @@ import type {
   OkResponse,
   ErrorResponse,
   ThemeResponse,
+  ThreadsResponse,
+  CommentId,
+  SendRequest,
 } from '../shared/types.ts'
+
+/** What Send runs, and whether the agent at the other end can answer */
+export interface SendTarget {
+  command: string
+  /** With --replies: `skepsis` is how to run this skepsis, e.g.
+   *  [node, /path/to/cli.js], for the reply command each comment carries */
+  replies: { skepsis: readonly string[] } | null
+}
 
 export async function startServer(opts: {
   diffSource: DiffArgs
@@ -51,8 +69,8 @@ export async function startServer(opts: {
   cwd: string
   /** Serve /api/diff-hash for the page's change polling. Default true. */
   poll?: boolean
-  /** The --send command. Unset, /api/send doesn't exist. */
-  send?: string | null
+  /** Unset, /api/send and the thread routes don't exist. */
+  send?: SendTarget | null
   /** Overrides runSend's timeout, for tests */
   sendTimeoutMs?: number
 }): Promise<{ port: number; token: string; close: () => void }> {
@@ -63,12 +81,22 @@ export async function startServer(opts: {
 
   const app = new Hono()
   const token = newToken()
+  const replyToken = send?.replies ? (newToken() as ReplyToken) : null
+  // Known once listening; for SKEPSIS_URL and the reply command.
+  let serverUrl = ''
 
   // Every API call must carry the token (see tokenMatches). The theme boot
   // script is the exception: a <script src> can't send a header, and all it
-  // gives away is the theme.
+  // gives away is the theme. So is the agent's reply, which carries the reply
+  // token instead.
   app.use('/api/*', async (c, next) => {
-    if (c.req.path === '/api/theme.js' || tokenMatches(c.req.header(TOKEN_HEADER), token))
+    if (
+      c.req.path === '/api/theme.js' ||
+      (replyToken &&
+        c.req.method === 'POST' &&
+        /^\/api\/threads\/[^/]+\/replies$/.test(c.req.path)) ||
+      tokenMatches(c.req.header(TOKEN_HEADER), token)
+    )
       return next()
     return c.json(
       {
@@ -103,7 +131,7 @@ export async function startServer(opts: {
       fileHashes,
       patchHash: patchHash(patch),
       poll,
-      send: !!send,
+      send: send ? { replies: send.replies !== null } : null,
       viewed,
       commentSyntaxes,
       generated,
@@ -162,40 +190,109 @@ export async function startServer(opts: {
     return c.json({ ok: true } satisfies OkResponse)
   })
 
-  // Runs the --send command, so only the page may call it (see gate.ts).
-  // Sends run one at a time in arrival order, so two quick ones can't reach
-  // the far end swapped.
+  // Send runs the --send command, so only the page may call it (see
+  // gate.ts). Sends run one at a time in arrival order, so two quick ones
+  // can't reach the far end swapped.
+  const threads = new Threads()
   let sendQueue: Promise<SendResult> = Promise.resolve({ ok: true, output: '' })
-  // Known once listening; for SKEPSIS_URL.
-  let serverUrl = ''
   if (send) {
-    app.post(
-      '/api/send',
-      async (c, next) => {
-        const headers = {
-          host: c.req.header('host'),
-          origin: c.req.header('origin'),
-        }
-        if (!sendGate(headers))
-          return c.json({ error: 'forbidden' } satisfies ErrorResponse, 403)
-        await next()
-      },
-      zValidator('json', sendRequestSchema),
-      async (c) => {
-        // The blob comes from the page with the lines and excerpt, so all
-        // three describe the version on screen even if the file has changed
-        // since. Nothing here awaits, so sends join the queue as they arrive.
-        const payload = buildPayload(diffSource, cwd, c.req.valid('json'))
+    const gate = createMiddleware(async (c, next) => {
+      const headers = { host: c.req.header('host'), origin: c.req.header('origin') }
+      if (!sendGate(headers))
+        return c.json({ error: 'forbidden' } satisfies ErrorResponse, 403)
+      await next()
+    })
+    // Nothing here awaits before joining the queue, so sends join it as they
+    // arrive.
+    const deliver = (
+      comment: SendRequest,
+      thread: { id: CommentId; followUp: boolean },
+    ): Promise<SendResult> => {
+      const replies =
+        send.replies && replyToken
+          ? { server: serverUrl, token: replyToken, skepsis: send.replies.skepsis }
+          : null
+      const payload = buildPayload(diffSource, cwd, comment, thread, replies)
+      const run = (): Promise<SendResult> => {
         const env = { SKEPSIS_URL: serverUrl, SKEPSIS_ROOT: cwd }
-        const run = () =>
-          runSend(send, payload, { cwd, env, timeoutMs: opts.sendTimeoutMs })
-        const result = sendQueue.then(run, run)
-        sendQueue = result
-        const r = await result
+        return runSend(send.command, payload, { cwd, env, timeoutMs: opts.sendTimeoutMs })
+      }
+      const result = sendQueue.then(run, run)
+      sendQueue = result
+      return result
+    }
+
+    app.post('/api/send', gate, zValidator('json', sendRequestSchema), async (c) => {
+      // The blob comes from the page with the lines and excerpt, so all
+      // three describe the version on screen even if the file has changed
+      // since.
+      const comment = c.req.valid('json')
+      const id = threads.nextId()
+      const r = await deliver(comment, { id, followUp: false })
+      if (!r.ok) return c.json({ error: r.error } satisfies ErrorResponse, 502)
+      threads.open(id, comment)
+      return c.json({ ok: true } satisfies OkResponse)
+    })
+
+    app.post(
+      '/api/threads/:id/messages',
+      gate,
+      zValidator('json', followUpRequestSchema),
+      async (c) => {
+        const id = c.req.param('id')
+        const comment = threads.comment(id)
+        if (!comment)
+          return c.json({ error: `No sent comment ${id}` } satisfies ErrorResponse, 404)
+        const { text } = c.req.valid('json')
+        const r = await deliver(
+          { ...comment, text },
+          { id: id as CommentId, followUp: true },
+        )
         if (!r.ok) return c.json({ error: r.error } satisfies ErrorResponse, 502)
+        threads.add(id, { from: 'reviewer', text })
         return c.json({ ok: true } satisfies OkResponse)
       },
     )
+
+    // The page token doesn't reach this route (see the token middleware), so
+    // it checks the reply token itself.
+    if (replyToken)
+      app.post(
+        '/api/threads/:id/replies',
+        gate,
+        async (c, next) => {
+          if (!tokenMatches(c.req.header(REPLY_TOKEN_HEADER), replyToken))
+            return c.json(
+              { error: 'Wrong or missing reply token' } satisfies ErrorResponse,
+              403,
+            )
+          await next()
+        },
+        zValidator('json', replyRequestSchema),
+        (c) => {
+          const id = c.req.param('id')
+          const r = threads.add(id, { from: 'agent', text: c.req.valid('json').text })
+          if ('kind' in r)
+            return c.json(
+              {
+                error: `No comment ${id}: it was dismissed, or belongs to an earlier run of skepsis.`,
+              } satisfies ErrorResponse,
+              404,
+            )
+          return c.json({ ok: true } satisfies OkResponse)
+        },
+      )
+
+    app.get('/api/threads', (c) =>
+      c.json({ threads: threads.list() } satisfies ThreadsResponse),
+    )
+
+    app.delete('/api/threads/:id', (c) => {
+      const id = c.req.param('id')
+      if (!threads.delete(id))
+        return c.json({ error: `No sent comment ${id}` } satisfies ErrorResponse, 404)
+      return c.json({ ok: true } satisfies OkResponse)
+    })
   }
 
   app.delete('/api/comment', zValidator('json', commentDeleteSchema), async (c) => {
@@ -244,7 +341,10 @@ export async function startServer(opts: {
   return new Promise((resolve, reject) => {
     const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
       const assignedPort = typeof info === 'string' ? port : info.port
-      serverUrl = `http://${hostname}:${assignedPort}`
+      // An IPv6 literal needs brackets in a URL, or the reply command and
+      // SKEPSIS_URL point nowhere.
+      const host = hostname.includes(':') ? `[${hostname}]` : hostname
+      serverUrl = `http://${host}:${assignedPort}`
       console.info(
         `skepsis on ${serverUrl}/#token=${token} (${displayCommand(diffSource)})`,
       )

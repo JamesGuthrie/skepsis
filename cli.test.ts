@@ -240,4 +240,24 @@ describe('-C', () => {
       stderr: `-C ${join(gitRepo, 'a.ts')}: not a directory\n`,
     })
   })
+
+  it("can't be used with --reply", async () => {
+    const r = await exec(
+      process.execPath,
+      [
+        CLI,
+        '--reply',
+        'c1',
+        '--server',
+        'http://localhost:1',
+        '--token',
+        't',
+        '-C',
+        gitRepo,
+        'hi',
+      ],
+      { cwd: elsewhere },
+    ).catch((e: { code: number; stderr: string }) => e)
+    expect(r).toMatchObject({ code: 1, stderr: "--reply can't be used with -C\n" })
+  })
 })

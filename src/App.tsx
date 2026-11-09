@@ -48,10 +48,14 @@ import type {
 import { THEME_MODES, TOKEN_HEADER } from '../shared/types.ts'
 import { mergeDuplicateFiles } from './diffFiles.ts'
 import type {
+  CommentId,
   CommentRequest,
   DiffHashResponse,
   DiffResponse,
   SendRequest,
+  Side,
+  Thread,
+  ThreadsResponse,
   ErrorResponse,
   FileContentsResponse,
   ThemeMode,
@@ -247,18 +251,7 @@ type AnnotationMeta =
     }
   | { type: 'composing'; file: string }
   | { type: 'notice'; message: string }
-  | { type: 'sent'; sent: SentComment }
-
-/** A comment that went through --send. The page keeps these until reload, in
- *  the diff where they were written, so there's a record of what was sent. */
-type SentComment = {
-  id: number
-  file: string
-  side: Side
-  lines: [number, number]
-  quote: string | null
-  text: string
-}
+  | { type: 'sent'; thread: Thread & { anchor: NonNullable<Thread['anchor']> } }
 
 /** A comment box opened by selecting text. `columns` is null when the
  *  selection covers whole lines, which makes it a comment on those lines. */
@@ -690,8 +683,6 @@ function Button({
   )
 }
 
-type Side = 'additions' | 'deletions'
-
 /** Where to show a sent comment on `line`: that line while the diff shows it,
  *  else the nearest line it does show, so an edit that moves the hunk (as the
  *  agent's answer often will) doesn't take the comment off the page. Null
@@ -920,6 +911,123 @@ function CommentForm({
               Comment
             </Button>
           )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** A comment that went through Send, what followed it, and a box to follow
+ *  up in. It stays in the diff under the line it was on until dismissed. */
+function SentThread({
+  thread,
+  reply,
+  onStartReply,
+  onDismiss,
+}: {
+  thread: Thread
+  /** The open reply box, if it's this thread's */
+  reply: {
+    /** As CommentForm's: the box remounts when the threads refetch */
+    initialText: string
+    onTextChange: (text: string) => void
+    onSubmit: (text: string) => void
+    onCancel: () => void
+    submitting: boolean
+    error: string | null
+  } | null
+  onStartReply: () => void
+  onDismiss: () => void
+}) {
+  return (
+    <div className="sent-comment">
+      <div className="sent-comment-head">
+        <span className="sent-comment-label">Sent</span>
+        {thread.quote && (
+          <span className="comment-quote">{shortQuote(thread.quote, 120)}</span>
+        )}
+        <button
+          type="button"
+          className="sent-comment-dismiss"
+          aria-label="Dismiss"
+          title="Dismiss"
+          onClick={onDismiss}
+        >
+          ×
+        </button>
+      </div>
+      <div className="sent-comment-text">{thread.text}</div>
+      {thread.messages.length > 0 && (
+        <ol className="sent-comment-messages">
+          {thread.messages.map((m) => (
+            <li key={m.id} className={`sent-comment-message from-${m.from}`}>
+              <span className="sent-comment-label">
+                {m.from === 'agent' ? 'Agent' : 'You'}
+              </span>
+              <div className="sent-comment-text">{m.text}</div>
+            </li>
+          ))}
+        </ol>
+      )}
+      {reply ? (
+        <ReplyForm {...reply} />
+      ) : (
+        <div className="sent-comment-actions">
+          <Button variant="ghost" onClick={onStartReply}>
+            Reply
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ReplyForm({
+  initialText,
+  onTextChange,
+  onSubmit,
+  onCancel,
+  submitting,
+  error,
+}: NonNullable<Parameters<typeof SentThread>[0]['reply']>) {
+  const [text, setText] = useState(initialText)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    ref.current?.focus()
+  }, [])
+  const run = () => {
+    const body = text.trim()
+    if (body && !submitting) onSubmit(body)
+  }
+  return (
+    <div className="comment-form sent-comment-reply" onClick={(e) => e.stopPropagation()}>
+      <textarea
+        ref={ref}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value)
+          onTextChange(e.target.value)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault()
+            run()
+          }
+          if (e.key === 'Escape') onCancel()
+        }}
+        placeholder={`Follow up... (${SUBMIT_KEYS} sends)`}
+        rows={2}
+        disabled={submitting}
+      />
+      <div className="comment-form-actions">
+        {error && <div className="comment-form-error">{error}</div>}
+        <div className="comment-form-buttons">
+          <Button variant="ghost" onClick={onCancel} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button variant="primary" disabled={!text.trim() || submitting} onClick={run}>
+            Send
+          </Button>
         </div>
       </div>
     </div>
@@ -1690,8 +1798,10 @@ function DiffView() {
     /** Counts opens, so a box reopened in place starts over */
     opened: number
   } | null>(null)
-  const [sent, setSent] = useState<SentComment[]>([])
-  const sentId = useRef(0)
+  // The sent comment whose reply box is open
+  const [replying, setReplying] = useState<CommentId | null>(null)
+  // Its text, kept here for the same reason as draftRef
+  const replyDraftRef = useRef('')
   // The open comment box's text. A refetched diff remounts the box, and it
   // starts again from this.
   const draftRef = useRef('')
@@ -1852,18 +1962,37 @@ function DiffView() {
   // --send. The box stays open with its draft and the error when a send
   // fails; when one goes through, the box gives way to the sent comment.
   const sendMutation = useMutation({
-    // `quote` is for the sent comment to show
-    mutationFn: ({ quote: _, ...body }: SendRequest & { quote: string | null }) =>
-      apiFetch('/api/send', { method: 'POST', body }),
-    onSuccess: (_, { file, side, lines, quote, text }) => {
-      setComposing(null)
-      // The page only sends from a line, so these are always set
-      if (file && side && lines)
-        setSent((prev) => [
-          ...prev,
-          { id: ++sentId.current, file, side, lines, quote, text },
-        ])
+    mutationFn: (body: SendRequest) => apiFetch('/api/send', { method: 'POST', body }),
+    onSuccess: () => setComposing(null),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['threads'] }),
+  })
+
+  // Sent comments and their replies live on the server, so they outlast a
+  // reload. Only with --replies can the agent answer, so only then is there
+  // anything to poll.
+  const { data: threadsData } = useQuery({
+    queryKey: ['threads'],
+    queryFn: () => apiFetch<ThreadsResponse>('/api/threads'),
+    enabled: !!data?.send,
+    refetchInterval: data?.send?.replies ? POLL_MS : false,
+  })
+  const threads = threadsData?.threads
+
+  // A follow-up from the reviewer on a sent comment. Like Send, the box keeps
+  // its draft and the error when it fails.
+  const followUpMutation = useMutation({
+    mutationFn: ({ id, text }: { id: CommentId; text: string }) =>
+      apiFetch(`/api/threads/${id}/messages`, { method: 'POST', body: { text } }),
+    onSuccess: () => {
+      replyDraftRef.current = ''
+      setReplying(null)
     },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['threads'] }),
+  })
+
+  const dismissMutation = useMutation({
+    mutationFn: (id: CommentId) => apiFetch(`/api/threads/${id}`, { method: 'DELETE' }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['threads'] }),
   })
 
   const resolveMutation = useMutation({
@@ -2139,7 +2268,7 @@ function DiffView() {
   }, [data, viewed])
 
   const commentsEnabled = data?.commentsEnabled ?? false
-  const send = data?.send ?? false
+  const send = !!data?.send
 
   const [showHelp, setShowHelp] = useState(false)
   const [showCommentsInfo, setShowCommentsInfo] = useState(false)
@@ -2249,16 +2378,18 @@ function DiffView() {
       // Sent comments go before the box, so a follow-up on the same line
       // opens under what was already sent.
       const sentHere: string[] = []
-      for (const s of sent) {
-        if (s.file !== name) continue
-        const line = nearestLine(fileDiff, s.side, s.lines[1])
+      for (const thread of threads ?? []) {
+        const { anchor } = thread
+        if (anchor?.file !== name) continue
+        const line = nearestLine(fileDiff, anchor.side, anchor.lines[1])
         if (line === null) continue
         annotations.push({
-          side: s.side,
+          side: anchor.side,
           lineNumber: line,
-          metadata: { type: 'sent', sent: s },
+          metadata: { type: 'sent', thread: { ...thread, anchor } },
         })
-        sentHere.push(`${s.id}@${line}`)
+        const open = replying === thread.id ? 'r' : ''
+        sentHere.push(`${thread.id}@${line}:${thread.messages.length}${open}`)
       }
       // A box on part of a line goes inside the line instead (see inlineBox)
       const composingHere = composing?.file === name && !composing.text?.columns
@@ -2285,7 +2416,7 @@ function DiffView() {
         version,
       }
     })
-  }, [files, patchFiles, data, composing, sent, collapsed, commentsEnabled])
+  }, [files, patchFiles, data, composing, threads, replying, collapsed, commentsEnabled])
   itemsRef.current = items
 
   // The header highlight falls back to the first file before any focus exists
@@ -2492,7 +2623,7 @@ function DiffView() {
                     side,
                     lines: [first, line],
                     columns,
-                    quote: columns && selected ? selected.quote : null,
+                    quote: (columns && selected?.quote) || undefined,
                     code: fileDiff && lineContext(fileDiff, side, first, line),
                     blob: fileDiff && sideBlob(fileDiff, side),
                     text,
@@ -2550,31 +2681,39 @@ function DiffView() {
         )
       }
       if (meta.type === 'sent') {
-        const { id, quote, text } = meta.sent
+        const { id } = meta.thread
+        const isReplying = replying === id
         return (
-          <div className="sent-comment">
-            <div className="sent-comment-head">
-              <span className="sent-comment-label">Sent</span>
-              {quote && <span className="comment-quote">{shortQuote(quote, 120)}</span>}
-              <button
-                type="button"
-                className="sent-comment-dismiss"
-                aria-label="Dismiss"
-                title="Dismiss"
-                onClick={() => setSent((prev) => prev.filter((s) => s.id !== id))}
-              >
-                ×
-              </button>
-            </div>
-            <div className="sent-comment-text">{text}</div>
-          </div>
+          <SentThread
+            thread={meta.thread}
+            reply={
+              isReplying
+                ? {
+                    initialText: replyDraftRef.current,
+                    onTextChange: (text) => {
+                      replyDraftRef.current = text
+                    },
+                    onSubmit: (text) => followUpMutation.mutate({ id, text }),
+                    onCancel: () => setReplying(null),
+                    submitting: followUpMutation.isPending,
+                    error: followUpMutation.error?.message ?? null,
+                  }
+                : null
+            }
+            onStartReply={() => {
+              followUpMutation.reset()
+              replyDraftRef.current = ''
+              setReplying(id)
+            }}
+            onDismiss={() => dismissMutation.mutate(id)}
+          />
         )
       }
       if (meta.type === 'composing')
         return renderComposer(item.type === 'diff' ? item.fileDiff : null)
       return null
     },
-    [resolveMutation, renderComposer],
+    [resolveMutation, renderComposer, followUpMutation, dismissMutation, replying],
   )
 
   // Gutter-utility click (start a comment). Routed through a ref so the
@@ -3134,7 +3273,7 @@ function DiffView() {
       {!data.commentsEnabled && (
         <CommentsDisabledBanner
           vcs={data.vcs}
-          send={data.send}
+          send={!!data.send}
           interdiff={data.interdiff}
           onLearnMore={() => setShowCommentsInfo(true)}
         />
@@ -3176,7 +3315,7 @@ function DiffView() {
           )}
           {diffChanged && <DiffChangedToast changes={changes} onRefresh={refreshDiff} />}
         </div>
-        {showHelp && <HelpModal send={data.send} onClose={() => setShowHelp(false)} />}
+        {showHelp && <HelpModal send={!!data.send} onClose={() => setShowHelp(false)} />}
         {showCommentsInfo && (
           <CommentsModal
             vcs={data.vcs}

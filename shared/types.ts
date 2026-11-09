@@ -50,6 +50,9 @@ export const sendRequestSchema = z.object({
   columns: z
     .tuple([z.number().int().nonnegative(), z.number().int().nonnegative()])
     .nullable(),
+  /** The selected text at `columns`, for the page to show on the sent
+   *  comment. Not part of what --send delivers. */
+  quote: z.string().optional(),
   /** An excerpt around the lines commented on, as runs of consecutive lines
    *  with each run's first and last line. Lines the diff hides split it. */
   code: z
@@ -70,6 +73,12 @@ export const sendRequestSchema = z.object({
   text: z.string().min(1),
 })
 
+/** A follow-up from the reviewer on a sent comment's thread */
+export const followUpRequestSchema = z.object({ text: z.string().min(1) })
+
+/** The agent's answer on a sent comment's thread, from `skepsis --reply` */
+export const replyRequestSchema = z.object({ text: z.string().min(1) })
+
 export const commentDeleteSchema = z.object({
   file: z.string(),
   line: z.number(),
@@ -87,10 +96,43 @@ export type ViewedRequest = z.infer<typeof viewedRequestSchema>
 export type CommentRequest = z.infer<typeof commentRequestSchema>
 export type CommentDeleteRequest = z.infer<typeof commentDeleteSchema>
 export type SendRequest = z.infer<typeof sendRequestSchema>
+export type FollowUpRequest = z.infer<typeof followUpRequestSchema>
+export type ReplyRequest = z.infer<typeof replyRequestSchema>
+
+// --- Threads ---
+
+/** The server's name for a sent comment, unique within a run. The agent
+ *  answers by it, so it's short: `c1`, `c2`, ... */
+export type CommentId = string & { readonly __brand: 'CommentId' }
+
+export type Side = 'additions' | 'deletions'
+
+/** A sent comment and what followed it */
+export interface Thread {
+  id: CommentId
+  /** Null for a comment on the diff as a whole. The page always sends from
+   *  lines, but the --send contract allows one. */
+  anchor: { file: string; side: Side; lines: [number, number] } | null
+  /** The selected text, for a comment on part of the lines */
+  quote: string | null
+  /** The comment that opened the thread, from the reviewer */
+  text: string
+  /** Everything after it, in the order it arrived */
+  messages: { id: number; from: 'reviewer' | 'agent'; text: string }[]
+}
+
+export interface ThreadsResponse {
+  threads: Thread[]
+}
 
 /** The header every API request carries the per-run token in. The page gets
  *  the token from the `#token=` fragment of the URL skepsis prints and opens. */
 export const TOKEN_HEADER = 'X-Skepsis-Token'
+
+/** The header `skepsis --reply` carries the per-run reply token in. It's a
+ *  separate token so the page's can't post replies and the agent's can't call
+ *  anything else. */
+export const REPLY_TOKEN_HEADER = 'X-Skepsis-Reply-Token'
 
 // --- UI types ---
 
@@ -156,8 +198,9 @@ export interface DiffResponse {
   patchHash: string
   /** Whether the page should poll /api/diff-hash (off with --no-poll). */
   poll: boolean
-  /** Whether --send is set, so the comment box can send */
-  send: boolean
+  /** Null when the comment box can't send. With `replies` (--replies), the
+   *  agent can answer in the page, so there are replies to poll for. */
+  send: { replies: boolean } | null
   viewed: ViewedMap
   /** Per-file comment syntax, shown in the comment form. An empty prefix
    *  means the format has no comment syntax (e.g. plain text); null means the

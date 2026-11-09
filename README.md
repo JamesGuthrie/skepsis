@@ -186,8 +186,8 @@ hash no longer matches and it automatically shows as unviewed again.
 `--send <command>` (or `SKEPSIS_SEND` in the environment) adds a **Send** button
 to the comment box, which pipes the comment to a shell command instead
 of writing it into the file. Use it to pass review comments straight to a coding
-agent, a tmux pane, or a log. There is not chat UI in skepsis (yet) so replies
-from the agent will appear in that session, wherever it is. Send works
+agent, a tmux pane, or a log. Replies from the agent appear in that session,
+wherever it is, unless you add `--replies` (see below). Send works
 in some cases that inline comments can't (because there is no file to write): on
 removed lines, and on diffs that don't end at the working copy. The **Comment**
 button continues to write a `<review>` marker in the file as usual. When you
@@ -230,6 +230,8 @@ The JSON sent to stdin looks like this:
 ````json
 {
   "version": 1,
+  "comment_id": "c1",
+  "follow_up": false,
   "root": "/home/me/project",
   "diff": { "command": "jj diff -r @-", "toWorkingCopy": false },
   "file": "src/a.ts",
@@ -239,6 +241,7 @@ The JSON sent to stdin looks like this:
   "code": [{ "lines": [41, 46], "text": "const z = 0\nconst a = 1\n…" }],
   "blob": "9daeafb",
   "text": "why two?",
+  "reply": null,
   "prompt": "Review comment on src/a.ts, lines 42–45 (new side of `jj diff -r @-`), in lines 41–46:\n\n```\nconst z = 0\nconst a = 1\n…\n```\n\nwhy two?"
 }
 ````
@@ -247,23 +250,50 @@ The JSON sent to stdin looks like this:
 that side's numbering. `columns` is set when the comment is on selected text
 rather than whole lines: where the text starts in the first line and ends
 (exclusive) in the last, 0-based, in UTF-16 code units. The prompt then marks
-the text in the excerpt with `⟦` and `⟧`. `code` is an excerpt of that side around the lines
-commented on, in runs of consecutive lines, each with its own first and last
+the text in the excerpt with `⟦` and `⟧`. `comment_id` names the comment's
+thread, and `follow_up` is true when the reviewer is following up on an earlier
+comment from the page, which keeps its `comment_id` and anchor fields.
+`code` is an excerpt of that side around the lines commented on, in runs of consecutive lines, each with its own first and last
 line. There's more than one run when the lines commented on span lines the
 diff doesn't show. `blob` is the ID of the
 version of the file those line numbers refer to (old or new, by `side`), or
 null where the diff has none, as for an added file's old side or a pure
 rename. It's the version on the page, which is older than the file on disk if
-the file changed since the page last refreshed. `prompt` is all of it as plain text, for consumers that only want a
-message.
+the file changed since the page last refreshed. `reply` is null unless
+`--replies` is set (see below). `prompt` is all of it as plain text, for
+consumers that only want a message.
 
 Exit 0 means the comment was delivered, and the page keeps the comment in the
-diff, under the line it was on, until you dismiss it or reload. skepsis ignores
-stdout. Any other exit, or running past 10 seconds, is a failure: the page shows
+diff, under the line it was on, until you dismiss it or skepsis exits. skepsis
+ignores stdout. Any other exit, or running past 10 seconds, is a failure: the page shows
 stderr (or the exit status) and keeps the comment in the box. Sends run one at a
 time, in the order they were submitted.
 
 </details>
+
+### Answers in the page
+
+With `--replies` as well as `--send`, the agent can answer each comment in the
+page, under the comment, where you can follow up. Each comment ends with
+instructions and a command for the agent to run:
+
+```sh
+/usr/bin/node /path/to/skepsis/dist/cli.js --reply c1 --server http://localhost:4000 --token <reply token> - <<'EOF'
+<the reply>
+EOF
+```
+
+The text can also go after the command as one argument instead of `-`. The
+command names the same node and skepsis this run uses, so it works when
+skepsis isn't on the agent's `PATH`, as with `npx`. In the JSON, `reply` has
+the parts: `server`, `token` and `command` (without the text).
+
+With Claude Code, ask the session to start skepsis in the background with the
+socket recipe above, so that `CLAUDE_CODE_MESSAGING_SOCKET` is set:
+
+```sh
+npx @oxide/skepsis --replies --send 'jq -c "{type:\"user\",message:{role:\"user\",content:.prompt}}" | nc -U "$CLAUDE_CODE_MESSAGING_SOCKET"'
+```
 
 <details>
 <summary>Notes on security</summary>
@@ -279,6 +309,10 @@ other users on the machine or other processes running as you.
 As a backup, `--send` also requires a loopback `--host`, and `/api/send` rejects
 requests whose `Host` isn't a loopback name or whose `Origin`
 isn't the page's own.
+
+With `--replies`, the agent posts its answers with a second per-run token,
+which reaches it in each comment. That token only lets it add replies, and the
+page's token can't add them. Replies show in the page as plain text.
 
 </details>
 

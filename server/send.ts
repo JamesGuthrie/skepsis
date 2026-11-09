@@ -11,11 +11,19 @@
 // added, but removing or changing one is a major version.
 
 import { spawn } from 'node:child_process'
-import type { DiffArgs, SendRequest } from '../shared/types.ts'
+import type { CommentId, DiffArgs, SendRequest } from '../shared/types.ts'
 import { displayCommand } from './displayCommand.ts'
+import { replyCommand } from './reply.ts'
+import type { ReplyAccess, ReplyToken } from './reply.ts'
 
 export interface SendPayload {
   version: 1
+  /** The thread this message belongs to: the comment's own id, or for a
+   *  follow-up, the id of the comment that opened the thread */
+  comment_id: CommentId
+  /** Whether this is the reviewer following up on an earlier comment. The
+   *  anchor fields are then the opening comment's. */
+  follow_up: boolean
   /** The directory skepsis runs in, which is also the command's cwd */
   root: string
   diff: {
@@ -41,6 +49,14 @@ export interface SendPayload {
    *  file's old side or a pure rename. */
   blob: string | null
   text: string
+  /** How to answer this comment in the page. Null without --replies. */
+  reply: {
+    server: string
+    token: ReplyToken
+    /** Ready to run with the reply text after it, or `-` and the text on
+     *  stdin */
+    command: string
+  } | null
   /** All of the above as plain text, for consumers that just want a message */
   prompt: string
 }
@@ -49,9 +65,14 @@ export function buildPayload(
   diffSource: DiffArgs,
   root: string,
   input: SendRequest,
+  thread: { id: CommentId; followUp: boolean },
+  /** `skepsis` is how to run this skepsis, for the reply command */
+  replies: (ReplyAccess & { skepsis: readonly string[] }) | null,
 ): SendPayload {
   const base = {
     version: 1 as const,
+    comment_id: thread.id,
+    follow_up: thread.followUp,
     root,
     diff: {
       command: displayCommand(diffSource),
@@ -64,6 +85,11 @@ export function buildPayload(
     code: input.code,
     blob: input.blob,
     text: input.text,
+    reply: replies && {
+      server: replies.server,
+      token: replies.token,
+      command: replyCommand(replies.skepsis, replies, thread.id),
+    },
   }
   return { ...base, prompt: renderPrompt(base) }
 }
@@ -101,15 +127,37 @@ function markExcerpt(
   return runs.map(({ lines: range, rows }) => ({ lines: range, text: rows.join('\n') }))
 }
 
+/** How to answer in the page, for the end of the prompt. The reviewer only
+ *  sees the page, so the agent hears it with every comment. */
+function replyInstructions(command: string): string {
+  return `The reviewer reads the review page, not this session, so answer there by running:
+
+${command} - <<'EOF'
+<your reply>
+EOF
+
+If the comment asks for a change, make it first, then reply saying what you did; the page picks up the new diff on its own. Write the reply like a reply in a pull request review: one to three short sentences of plain text. The page doesn't render Markdown, so no headings, lists, bold or code blocks. Answer the question or say what you changed, and stop. Don't restate the comment, summarise the diff, or paste code the reviewer can already see in the diff.`
+}
+
 export function renderPrompt(p: Omit<SendPayload, 'prompt'>): string {
+  const message = renderMessage(p)
+  return p.reply ? `${message}\n\n${replyInstructions(p.reply.command)}` : message
+}
+
+function renderMessage(p: Omit<SendPayload, 'prompt'>): string {
   const command = `\`${p.diff.command}\``
-  if (p.file === null) return `Review comment on ${command}:\n\n${p.text}`
+  if (p.file === null)
+    return p.follow_up
+      ? `Follow-up on the review comment on ${command}:\n\n${p.text}`
+      : `Review comment on ${command}:\n\n${p.text}`
   const where = !p.lines
     ? ''
     : p.lines[0] === p.lines[1]
       ? `, line ${p.lines[0]}`
       : `, lines ${p.lines[0]}–${p.lines[1]}`
   const side = p.side === 'deletions' ? 'old side' : 'new side'
+  if (p.follow_up)
+    return `Follow-up on the review comment on ${p.file}${where} (${side} of ${command}):\n\n${p.text}`
   const head = `Review comment on ${p.file}${where} (${side} of ${command})`
   if (!p.code) return `${head}:\n\n${p.text}`
   const ranges = p.code.map(({ lines: [first, last] }) =>
