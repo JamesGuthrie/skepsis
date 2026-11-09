@@ -93,7 +93,7 @@ const queryClient = new QueryClient({
 // separately.
 const DIFF_THEME = { light: 'github-light-default', dark: 'github-dark-default' } as const
 
-// Highlights (WASM lexers, beta in @pierre/diffs 1.6) rather than the default
+// Highlights (WASM lexers) rather than the default
 // Shiki. It has fewer languages (about 80); the rest render as plain text, with
 // no fallback to Shiki, since one highlighter serves the whole page. Like the
 // theme, this has to reach both the CodeView options and the worker pool.
