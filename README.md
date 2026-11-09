@@ -126,6 +126,7 @@ skepsis -r main..my-branch       # review commits on my-branch
 skepsis -r HEAD~5..HEAD          # review the last 5 commits
 skepsis -f v1.2.0 -t v1.3.0      # compare two tags
 skepsis --git                    # force git in a jj-colocated repo
+skepsis -C ~/src/other a.ts      # review ~/src/other/a.ts without cd-ing
 ```
 
 ## How it works
