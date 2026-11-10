@@ -27,7 +27,7 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react'
-import type { ReactElement } from 'react'
+import type { ReactElement, RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { Tooltip } from '@base-ui/react/tooltip'
 import { canUseWASM, parsePatchFiles, parseDiffFromFile } from '@pierre/diffs'
@@ -35,7 +35,7 @@ import { CodeView, WorkerPoolContextProvider } from '@pierre/diffs/react'
 import type { CodeViewHandle } from '@pierre/diffs/react'
 import { FileTree, useFileTree } from '@pierre/trees/react'
 import { preparePresortedFileTreeInput } from '@pierre/trees'
-import type { GitStatus, GitStatusEntry } from '@pierre/trees'
+import type { FileTreeRowDecoration, GitStatus, GitStatusEntry } from '@pierre/trees'
 import DiffsHighlightWorker from '@pierre/diffs/worker/worker.js?worker'
 import type {
   CodeViewDiffItem,
@@ -51,6 +51,7 @@ import { THEME_MODES, TOKEN_HEADER } from '../shared/types.ts'
 import { mergeDuplicateFiles } from './diffFiles.ts'
 import type {
   CommentId,
+  MessageId,
   CommentRequest,
   DiffHashResponse,
   DiffResponse,
@@ -434,17 +435,42 @@ function compareTreeOrder(a: string, b: string): number {
   return 0
 }
 
-// Tree icons: the built-in minimal set plus a check (octicon check-16) for the
-// viewed-file row decoration. The sprite is zero-sized because the library
-// inserts a custom sheet as a rendered element, not hidden like its own. This
-// is also what gets passed to setIcons() to re-render rows when viewed state
-// changes: the decoration renderer is fixed at construction and the library
-// has no invalidate call, but setIcons re-renders unconditionally.
+// Tree icons: the built-in minimal set plus the row decorations: a check
+// (octicon check-16) for a viewed file, and a speech bubble for a sent
+// comment's thread (octicon comment-fill-16 when unread, comment-16 when
+// read). The sprite is zero-sized because the library inserts a custom sheet
+// as a rendered element, not hidden like its own. This is also what gets
+// passed to setIcons() to re-render rows when the decorations change: the
+// decoration renderer is fixed at construction and the library has no
+// invalidate call, but setIcons re-renders unconditionally.
 const TREE_ICONS = {
   set: 'minimal',
   spriteSheet:
-    '<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true"><symbol id="skepsis-check" viewBox="0 0 16 16"><path fill="currentColor" d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></symbol></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true">' +
+    '<symbol id="skepsis-check" viewBox="0 0 16 16"><path fill="currentColor" d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></symbol>' +
+    '<symbol id="skepsis-thread-unread" viewBox="0 0 16 16"><path fill="currentColor" fill-rule="evenodd" d="M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 13.25 12H9.06l-2.573 2.573A1.457 1.457 0 0 1 4 13.543V12H2.75A1.75 1.75 0 0 1 1 10.25z"/></symbol>' +
+    '<symbol id="skepsis-thread-read" viewBox="0 0 16 16"><path fill="currentColor" d="M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 13.25 12H9.06l-2.573 2.573A1.458 1.458 0 0 1 4 13.543V12H2.75A1.75 1.75 0 0 1 1 10.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h4.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></symbol>' +
+    '</svg>',
 } as const
+
+/** Whether the agent's answer on a file's threads is waiting on the reviewer.
+ *  A file with both counts as unread. */
+type ThreadState = 'unread' | 'read'
+
+const THREAD_DECORATION = {
+  unread: {
+    icon: { name: 'skepsis-thread-unread', width: 14, height: 14 },
+    title: 'Unread reply',
+  },
+  read: {
+    icon: { name: 'skepsis-thread-read', width: 14, height: 14 },
+    title: 'Conversation',
+  },
+} as const satisfies Record<ThreadState, FileTreeRowDecoration>
+const VIEWED_DECORATION = {
+  icon: { name: 'skepsis-check', width: 14, height: 14 },
+  title: 'Viewed',
+} as const satisfies FileTreeRowDecoration
 
 // Shadow-root CSS the --trees-* hooks can't express: the search box sits
 // flush against the top (the library only pads it horizontally, by
@@ -459,6 +485,12 @@ const TREE_CSS = `
   [data-item-section="decoration"] {
     color: var(--trees-git-added-color);
     flex: 1 0 auto;
+  }
+  [data-item-section="decoration"]:has(use[href^="#skepsis-thread"]) {
+    color: var(--trees-fg-muted);
+  }
+  [data-item-type="file"] [data-item-section="decoration"]:has(use[href^="#skepsis-thread"]) {
+    cursor: pointer;
   }
 `
 
@@ -951,6 +983,7 @@ function SentThread({
   reply,
   onStartReply,
   onDismiss,
+  onRead,
 }: {
   thread: Thread
   /** The open reply box, if it's this thread's */
@@ -965,7 +998,11 @@ function SentThread({
   } | null
   onStartReply: () => void
   onDismiss: () => void
+  onRead: (through: MessageId) => void
 }) {
+  const lastRef = useRef<HTMLLIElement>(null)
+  const unreadThrough = thread.unread ? (thread.messages.at(-1)?.id ?? null) : null
+  useReadWhenSeen(lastRef, unreadThrough, onRead)
   return (
     <div className="sent-comment">
       <div className="sent-comment-head">
@@ -987,10 +1024,15 @@ function SentThread({
       {thread.messages.length > 0 && (
         <ol className="sent-comment-messages">
           {thread.messages.map((m) => (
-            <li key={m.id} className={`sent-comment-message from-${m.from}`}>
+            <li
+              key={m.id}
+              ref={m.id === unreadThrough ? lastRef : undefined}
+              className={`sent-comment-message from-${m.from}`}
+            >
               <span className="sent-comment-label">
                 {m.from === 'agent' ? 'Agent' : 'You'}
               </span>
+              {m.id === unreadThrough && <span className="sent-comment-new">New</span>}
               <div className="sent-comment-text">{m.text}</div>
             </li>
           ))}
@@ -1007,6 +1049,56 @@ function SentThread({
       )}
     </div>
   )
+}
+
+// How long an unread reply has to stay on screen to count as read. Long
+// enough that scrolling or jumping past it doesn't count.
+const READ_DWELL_MS = 3500
+
+/** Call `onRead(through)` once the element has been on screen, in a visible
+ *  tab, for READ_DWELL_MS. Null `through` means there's nothing to read. */
+function useReadWhenSeen(
+  ref: RefObject<HTMLElement | null>,
+  through: MessageId | null,
+  onRead: (through: MessageId) => void,
+) {
+  const onReadRef = useRef(onRead)
+  onReadRef.current = onRead
+  useEffect(() => {
+    const el = ref.current
+    if (through === null || !el) return
+    let onScreen = false
+    let timer: number | undefined
+    const update = () => {
+      const seeing = onScreen && document.visibilityState === 'visible'
+      if (seeing && timer === undefined) {
+        timer = window.setTimeout(() => onReadRef.current(through), READ_DWELL_MS)
+      } else if (!seeing && timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+    }
+    // Half of it on screen counts, or half the screen for a reply taller
+    // than that. The fine thresholds make the second case report as it
+    // fills the screen.
+    const observer = new IntersectionObserver(
+      ([e]) => {
+        onScreen =
+          e!.isIntersecting &&
+          (e!.intersectionRatio >= 0.5 ||
+            e!.intersectionRect.height >= window.innerHeight / 2)
+        update()
+      },
+      { threshold: Array.from({ length: 21 }, (_, i) => i / 20) },
+    )
+    observer.observe(el)
+    document.addEventListener('visibilitychange', update)
+    return () => {
+      observer.disconnect()
+      document.removeEventListener('visibilitychange', update)
+      clearTimeout(timer)
+    }
+  }, [ref, through])
 }
 
 function ReplyForm({
@@ -1325,13 +1417,20 @@ function FileTreePanel({
   paths,
   gitStatus,
   viewed,
+  threads,
   focusedFile,
   onSelectFile,
+  onSelectThread,
 }: {
   paths: string[]
   gitStatus: GitStatusEntry[]
   // Files whose current content is marked viewed; shown with a check.
   viewed: ReadonlySet<string>
+  // Files with sent comments, shown with a bubble. An unread one outranks
+  // the check, a read one doesn't.
+  threads: ReadonlyMap<string, ThreadState>
+  // A file row's bubble was clicked
+  onSelectThread: (path: string) => void
   focusedFile: string | null
   onSelectFile: (path: string) => void
 }) {
@@ -1342,6 +1441,7 @@ function FileTreePanel({
   const onSelectFileRef = useRef(onSelectFile)
   onSelectFileRef.current = onSelectFile
   const viewedRef = useRef(viewed)
+  const threadsRef = useRef(threads)
   // Presorted prepared input keeps the caller's order; see compareTreeOrder.
   const preparedInput = useMemo(() => preparePresortedFileTreeInput(paths), [paths])
   const { model } = useFileTree({
@@ -1354,10 +1454,18 @@ function FileTreePanel({
     density: 'compact',
     icons: TREE_ICONS,
     unsafeCSS: TREE_CSS,
-    renderRowDecoration: ({ item }) =>
-      item.kind === 'file' && viewedRef.current.has(item.path)
-        ? { icon: { name: 'skepsis-check', width: 14, height: 14 }, title: 'Viewed' }
-        : null,
+    renderRowDecoration: ({ item, row }) => {
+      if (item.kind === 'file') {
+        const thread = threadsRef.current.get(item.path)
+        if (thread === 'unread') return THREAD_DECORATION.unread
+        if (viewedRef.current.has(item.path)) return VIEWED_DECORATION
+        return thread ? THREAD_DECORATION.read : null
+      }
+      // An open folder shows its files' own rows instead.
+      if (row.isExpanded) return null
+      const thread = folderThreadState(threadsRef.current, item.path)
+      return thread ? THREAD_DECORATION[thread] : null
+    },
     onSelectionChange: (selected) => {
       if (syncingRef.current || selected.length !== 1) return
       const path = selected[0]!
@@ -1381,8 +1489,9 @@ function FileTreePanel({
 
   useEffect(() => {
     viewedRef.current = viewed
+    threadsRef.current = threads
     model.setIcons(TREE_ICONS) // re-render rows (see TREE_ICONS)
-  }, [model, viewed])
+  }, [model, viewed, threads])
 
   useEffect(() => {
     if (!focusedFile || !model.getItem(focusedFile)) return
@@ -1401,7 +1510,70 @@ function FileTreePanel({
     // appear. (resetPaths itself keeps selections for paths that survive.)
   }, [model, focusedFile, paths])
 
+  // XXX: this is a dirty ugly hack and I feel shame.
+  // The library has no click hook for decorations. A capture listener on
+  // the host runs before the row's own click, which would select the row and
+  // scroll to the top of the file instead. It's native: React doesn't route
+  // capture handlers on the host, a custom element. Stopping the row's click
+  // also stops it focusing the row, so that's done here, or the focus ring
+  // stays on the previous row.
+  const onSelectThreadRef = useRef(onSelectThread)
+  onSelectThreadRef.current = onSelectThread
+  useEffect(() => {
+    const host = document.querySelector('.file-tree')
+    if (!host) return
+    const onClick = (e: Event) => {
+      const bubble = e
+        .composedPath()
+        .find(
+          (el): el is Element =>
+            el instanceof Element && el.matches('[data-item-section="decoration"]'),
+        )
+      if (!bubble?.querySelector('use[href^="#skepsis-thread"]')) return
+      const path = bubble.closest('[data-item-type="file"]')?.getAttribute('data-item-path')
+      if (!path) return
+      e.stopPropagation()
+      model.getItem(path)?.focus()
+      onSelectThreadRef.current(path)
+    }
+    host.addEventListener('click', onClick, true)
+    return () => host.removeEventListener('click', onClick, true)
+  }, [model])
+
   return <FileTree className="file-tree" model={model} />
+}
+
+/** Where a sent comment's thread sits in the diff */
+type ThreadPlace = { file: string; side: Side; line: number }
+
+/** A file's first thread, or first unread one, by line */
+function firstThread(
+  item: CodeViewDiffItem<AnnotationMeta>,
+  which: 'unread' | 'any',
+): ThreadPlace | null {
+  let first: ThreadPlace | null = null
+  for (const { metadata, side, lineNumber } of item.annotations ?? []) {
+    if (metadata?.type !== 'sent' || (which === 'unread' && !metadata.thread.unread))
+      continue
+    if (!first || lineNumber < first.line) first = { file: item.id, side, line: lineNumber }
+  }
+  return first
+}
+
+/** The thread state a collapsed folder shows: unread if any file under it
+ *  has an unread thread, else read if any has a thread. */
+function folderThreadState(
+  threads: ReadonlyMap<string, ThreadState>,
+  folder: string,
+): ThreadState | null {
+  const prefix = folder.endsWith('/') ? folder : `${folder}/`
+  let state: ThreadState | null = null
+  for (const [file, s] of threads) {
+    if (!file.startsWith(prefix)) continue
+    if (s === 'unread') return s
+    state = s
+  }
+  return state
 }
 
 // The file tree's search box, or null when the tree is hidden. The box is
@@ -1567,6 +1739,7 @@ const SHORTCUTS: [string, string, 'send'?][] = [
   ['c', 'Comment on line'],
   [SUBMIT_KEYS, 'Send the comment to the --send command', 'send'],
   [INLINE_KEYS, 'Comment in the file (review marker)', 'send'],
+  ['u', 'Go to the first unread reply', 'send'],
   ['r', 'Refresh after the diff changes on disk'],
   ['Esc', 'Close / cancel'],
   ['?', 'Toggle this help'],
@@ -1712,13 +1885,13 @@ function DiffChangedToast({
     deletions += c.deletions
   }
   return (
-    <div className="diff-changed-toast" role="status">
-      <div className="diff-changed-row">
-        <span className="diff-changed-summary">
+    <div className="header-toast" role="status">
+      <div className="header-toast-row">
+        <span className="header-toast-summary">
           The diff changed on disk
           {list && (
             <>
-              <span className="diff-changed-count">
+              <span className="header-toast-count">
                 {list.length} {list.length === 1 ? 'file' : 'files'}
               </span>
               <LineCounts additions={additions} deletions={deletions} />
@@ -1742,6 +1915,21 @@ function DiffChangedToast({
           ))}
         </ul>
       )}
+    </div>
+  )
+}
+
+function UnreadToast({ count, onGo }: { count: number; onGo: () => void }) {
+  return (
+    <div className="header-toast" role="status">
+      <div className="header-toast-row">
+        <span className="header-toast-summary">
+          {count} unread {count === 1 ? 'reply' : 'replies'}
+        </span>
+        <button type="button" className="btn btn-tinted" onClick={onGo}>
+          Go to first <kbd>u</kbd>
+        </button>
+      </div>
     </div>
   )
 }
@@ -2017,6 +2205,12 @@ function DiffView() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['threads'] }),
   })
 
+  const readMutation = useMutation({
+    mutationFn: ({ id, through }: { id: CommentId; through: MessageId }) =>
+      apiFetch(`/api/threads/${id}/read`, { method: 'POST', body: { through } }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['threads'] }),
+  })
+
   const dismissMutation = useMutation({
     mutationFn: (id: CommentId) => apiFetch(`/api/threads/${id}`, { method: 'DELETE' }),
     onSettled: () => qc.invalidateQueries({ queryKey: ['threads'] }),
@@ -2283,6 +2477,14 @@ function DiffView() {
     }
     return set
   }, [data, viewed])
+  const threadFiles = useMemo(() => {
+    const map = new Map<string, ThreadState>()
+    for (const { anchor, unread } of threads ?? []) {
+      if (!anchor || map.get(anchor.file) === 'unread') continue
+      map.set(anchor.file, unread ? 'unread' : 'read')
+    }
+    return map
+  }, [threads])
 
   const commentsEnabled = data?.commentsEnabled ?? false
   const send = !!data?.send
@@ -2406,7 +2608,8 @@ function DiffView() {
           metadata: { type: 'sent', thread: { ...thread, anchor } },
         })
         const open = replying === thread.id ? 'r' : ''
-        sentHere.push(`${thread.id}@${line}:${thread.messages.length}${open}`)
+        const unread = thread.unread ? 'u' : ''
+        sentHere.push(`${thread.id}@${line}:${thread.messages.length}${open}${unread}`)
       }
       // A box on part of a line goes inside the line instead (see inlineBox)
       const composingHere = composing?.file === name && !composing.text?.columns
@@ -2435,6 +2638,55 @@ function DiffView() {
     })
   }, [files, patchFiles, data, composing, threads, replying, collapsed, commentsEnabled])
   itemsRef.current = items
+
+  // Unread threads, for the header toast: how many, and where the first is
+  // in the diff's order.
+  const unread = useMemo(() => {
+    let count = 0
+    let first: ThreadPlace | null = null
+    for (const item of items) {
+      for (const { metadata } of item.annotations ?? []) {
+        if (metadata?.type === 'sent' && metadata.thread.unread) count++
+      }
+      first ??= firstThread(item, 'unread')
+    }
+    return first && { count, first }
+  }, [items])
+
+  // A collapsed file (a viewed one, say) opens, so the reply can be read.
+  const goToThread = useCallback(
+    ({ file, side, line }: ThreadPlace) => {
+      // The scroll is marked programmatic, so onScroll won't set focus.
+      setFocused(file)
+      setCollapsed((prev) => (prev[file] ? { ...prev, [file]: false } : prev))
+      // After the expand has rendered, so the line has a place to scroll to
+      requestAnimationFrame(() => {
+        markProgrammaticScroll()
+        codeViewRef.current?.scrollTo({
+          type: 'line',
+          id: file,
+          lineNumber: line,
+          side,
+          align: 'center',
+          behavior: 'instant',
+        })
+      })
+    },
+    [setFocused, markProgrammaticScroll],
+  )
+  const goToUnread = useCallback(() => {
+    if (unread) goToThread(unread.first)
+  }, [unread, goToThread])
+  // The tree's bubble: the file's first unread thread if it has one, else
+  // its first thread.
+  const onTreeThread = useCallback(
+    (file: string) => {
+      const item = items.find((i) => i.id === file)
+      const place = item && (firstThread(item, 'unread') ?? firstThread(item, 'any'))
+      if (place) goToThread(place)
+    },
+    [items, goToThread],
+  )
 
   // The header highlight falls back to the first file before any focus exists
   // or when the focused file is no longer in the diff (e.g. removed by a
@@ -2723,6 +2975,7 @@ function DiffView() {
               setReplying(id)
             }}
             onDismiss={() => dismissMutation.mutate(id)}
+            onRead={(through) => readMutation.mutate({ id, through })}
           />
         )
       }
@@ -2730,7 +2983,14 @@ function DiffView() {
         return renderComposer(item.type === 'diff' ? item.fileDiff : null)
       return null
     },
-    [resolveMutation, renderComposer, followUpMutation, dismissMutation, replying],
+    [
+      resolveMutation,
+      renderComposer,
+      followUpMutation,
+      dismissMutation,
+      readMutation,
+      replying,
+    ],
   )
 
   // Gutter-utility click (start a comment). Routed through a ref so the
@@ -3154,6 +3414,11 @@ function DiffView() {
           e.preventDefault()
           setShowHelp((v) => !v)
           break
+        case 'u':
+          if (showHelp || composing || !unread) break
+          e.preventDefault()
+          goToUnread()
+          break
         case 'r':
           if (showHelp || !diffChanged) break
           e.preventDefault()
@@ -3250,6 +3515,8 @@ function DiffView() {
     refreshDiff,
     send,
     sendMutation,
+    unread,
+    goToUnread,
   ])
 
   // Error before loading: on a failed fetch react-query settles with `data`
@@ -3330,7 +3597,11 @@ function DiffView() {
               {toast.content}
             </div>
           )}
-          {diffChanged && <DiffChangedToast changes={changes} onRefresh={refreshDiff} />}
+          {diffChanged ? (
+            <DiffChangedToast changes={changes} onRefresh={refreshDiff} />
+          ) : (
+            unread && <UnreadToast count={unread.count} onGo={goToUnread} />
+          )}
         </div>
         {showHelp && <HelpModal send={!!data.send} onClose={() => setShowHelp(false)} />}
         {showCommentsInfo && (
@@ -3359,6 +3630,8 @@ function DiffView() {
               paths={treePaths}
               gitStatus={treeStatus}
               viewed={viewedFiles}
+              threads={threadFiles}
+              onSelectThread={onTreeThread}
               focusedFile={effectiveFocused}
               onSelectFile={onTreeSelect}
             />

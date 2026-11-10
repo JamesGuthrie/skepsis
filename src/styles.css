@@ -969,6 +969,12 @@ body,
   font-size: 12px;
 }
 
+.sent-comment-new {
+  margin-left: 6px;
+  color: var(--blue);
+  font-weight: 600;
+}
+
 .sent-comment-actions {
   display: flex;
   justify-content: flex-end;
@@ -1096,12 +1102,13 @@ body,
   }
 }
 
-/* Diff-changed toast: floats centered on the header bar, like .toast, until
-   Refresh. The file list hangs below the summary row in the same card, so
+/* A card centered on the header bar, like .toast, that stays until acted on:
+   the diff changed on disk, or replies are unread. The diff-changed file
+   list hangs below the summary row in the same card, so
    the card is placed by its row (top border + half the row's fixed height)
    rather than centered as a whole, and the list grows it downward only.
    Below .toast, which can briefly cover it. */
-.diff-changed-toast {
+.header-toast {
   --row-height: 38px;
   position: absolute;
   top: calc(50% - 1px - var(--row-height) / 2);
@@ -1117,10 +1124,10 @@ body,
   box-shadow: 0 4px 16px light-dark(oklch(0% 0 0 / 0.1), oklch(0% 0 0 / 0.4));
   color: var(--fg-bright);
   font-size: 13px;
-  animation: diff-changed-in 0.18s ease-out;
+  animation: header-toast-in 0.18s ease-out;
 }
 
-@keyframes diff-changed-in {
+@keyframes header-toast-in {
   from {
     opacity: 0;
   }
@@ -1131,7 +1138,7 @@ body,
   height: 56px;
 }
 
-.diff-changed-row {
+.header-toast-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1140,7 +1147,7 @@ body,
   padding: 0 6px 0 14px;
 }
 
-.diff-changed-summary {
+.header-toast-summary {
   display: flex;
   /* Baseline, not center: the counts are a smaller mono font, whose box
      centers a pixel higher than the label's text */
@@ -1150,17 +1157,17 @@ body,
   white-space: nowrap;
 }
 
-.diff-changed-count {
+.header-toast-count {
   color: var(--fg-muted);
   font-weight: 400;
 }
 
-.diff-changed-row .btn {
+.header-toast-row .btn {
   padding: 4px 10px;
   font-size: 13px;
 }
 
-.diff-changed-row .btn kbd {
+.header-toast-row .btn kbd {
   margin-left: 4px;
   padding: 0 4px;
   border: 1px solid color-mix(in oklab, currentColor 45%, transparent);

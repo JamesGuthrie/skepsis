@@ -79,6 +79,16 @@ export const followUpRequestSchema = z.object({ text: z.string().min(1) })
 /** The agent's answer on a sent comment's thread, from `skepsis --reply` */
 export const replyRequestSchema = z.object({ text: z.string().min(1) })
 
+/** The reviewer has read a thread up to and including message `through`.
+ *  The page names the message it saw, so a reply that lands meanwhile stays
+ *  unread. */
+export const readRequestSchema = z.object({
+  through: z
+    .number()
+    .int()
+    .transform((n) => n as MessageId),
+})
+
 export const commentDeleteSchema = z.object({
   file: z.string(),
   line: z.number(),
@@ -120,6 +130,9 @@ export type ReplyRequest = z.infer<typeof replyRequestSchema>
  *  answers by it, so it's short: `c1`, `c2`, ... */
 export type CommentId = string & { readonly __brand: 'CommentId' }
 
+/** A message in a thread, unique across threads within a run */
+export type MessageId = number & { readonly __brand: 'MessageId' }
+
 export type Side = 'additions' | 'deletions'
 
 /** A sent comment and what followed it */
@@ -133,7 +146,9 @@ export interface Thread {
   /** The comment that opened the thread, from the reviewer */
   text: string
   /** Everything after it, in the order it arrived */
-  messages: { id: number; from: 'reviewer' | 'agent'; text: string }[]
+  messages: { id: MessageId; from: 'reviewer' | 'agent'; text: string }[]
+  /** The agent spoke last and the reviewer hasn't read it yet */
+  unread: boolean
 }
 
 export interface ThreadsResponse {

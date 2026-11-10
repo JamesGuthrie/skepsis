@@ -27,8 +27,8 @@ test('a change on disk shows a banner listing it, and Refresh loads it', async (
   await repo.write('b.txt', 'hello\nworld\nagain\n')
   // Unchanged until now, so it enters the diff.
   await repo.write('long.ts', LONG_LINES.with(29, '// changed').join('\n') + '\n')
-  await expect(page.locator('.diff-changed-summary')).toContainText('2 files')
-  await expect(page.locator('.diff-changed-summary')).toContainText('+2-1')
+  await expect(page.locator('.header-toast-summary')).toContainText('2 files')
+  await expect(page.locator('.header-toast-summary')).toContainText('+2-1')
   const files = page.locator('.diff-changed-files li')
   await expect(files).toHaveCount(2)
   await expect(files.nth(0)).toHaveText(/^b\.txt\s*\+1$/)

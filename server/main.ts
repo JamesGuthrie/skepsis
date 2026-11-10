@@ -37,6 +37,7 @@ import {
   commentDeleteSchema,
   sendRequestSchema,
   followUpRequestSchema,
+  readRequestSchema,
   replyRequestSchema,
   fileContentsQuerySchema,
   themeRequestSchema,
@@ -286,6 +287,22 @@ export async function startServer(opts: {
           return c.json({ ok: true } satisfies OkResponse)
         },
       )
+
+    app.post('/api/threads/:id/read', zValidator('json', readRequestSchema), (c) => {
+      const id = c.req.param('id')
+      const r = threads.markRead(id, c.req.valid('json').through)
+      if ('kind' in r)
+        return c.json(
+          {
+            error:
+              r.kind === 'unknownComment'
+                ? `No sent comment ${id}`
+                : `No message ${r.id} in sent comment ${id}`,
+          } satisfies ErrorResponse,
+          404,
+        )
+      return c.json({ ok: true } satisfies OkResponse)
+    })
 
     app.get('/api/threads', (c) =>
       c.json({ threads: threads.list() } satisfies ThreadsResponse),

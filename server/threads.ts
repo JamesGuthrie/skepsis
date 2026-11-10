@@ -9,7 +9,7 @@
 // Sent comments and their replies, kept in memory for the life of the run so
 // they outlast a page reload.
 
-import type { CommentId, SendRequest, Thread } from '../shared/types.ts'
+import type { CommentId, MessageId, SendRequest, Thread } from '../shared/types.ts'
 
 type Message = Thread['messages'][number]
 
@@ -18,9 +18,13 @@ interface Entry {
   /** The comment as the page sent it, which follow-ups are anchored by */
   comment: SendRequest
   messages: Message[]
+  /** The newest message the reviewer has read, if any */
+  readThrough: MessageId | null
 }
 
 export type ReplyError = { kind: 'unknownComment'; id: string }
+
+export type ReadError = ReplyError | { kind: 'unknownMessage'; id: MessageId }
 
 export class Threads {
   #entries = new Map<CommentId, Entry>()
@@ -34,7 +38,7 @@ export class Threads {
   }
 
   open(id: CommentId, comment: SendRequest): void {
-    this.#entries.set(id, { id, comment, messages: [] })
+    this.#entries.set(id, { id, comment, messages: [], readThrough: null })
   }
 
   /** The comment that opened a thread, or null if there's no such thread */
@@ -45,7 +49,19 @@ export class Threads {
   add(id: string, message: Omit<Message, 'id'>): { ok: true } | ReplyError {
     const entry = this.#entries.get(id as CommentId)
     if (!entry) return { kind: 'unknownComment', id }
-    entry.messages.push({ id: ++this.#lastMessageId, ...message })
+    entry.messages.push({ id: ++this.#lastMessageId as MessageId, ...message })
+    return { ok: true }
+  }
+
+  /** Mark a thread read up to and including `through`. It never moves back,
+   *  so a stale request (from another tab, say) can't unread a reply. */
+  markRead(id: string, through: MessageId): { ok: true } | ReadError {
+    const entry = this.#entries.get(id as CommentId)
+    if (!entry) return { kind: 'unknownComment', id }
+    if (!entry.messages.some((m) => m.id === through))
+      return { kind: 'unknownMessage', id: through }
+    if (entry.readThrough === null || through > entry.readThrough)
+      entry.readThrough = through
     return { ok: true }
   }
 
@@ -54,7 +70,7 @@ export class Threads {
   }
 
   list(): Thread[] {
-    return [...this.#entries.values()].map(({ id, comment, messages }) => ({
+    return [...this.#entries.values()].map(({ id, comment, messages, readThrough }) => ({
       id,
       anchor:
         comment.file !== null && comment.side !== null && comment.lines !== null
@@ -63,6 +79,12 @@ export class Threads {
       quote: comment.quote ?? null,
       text: comment.text,
       messages: [...messages],
+      unread: isUnread(messages, readThrough),
     }))
   }
+}
+
+function isUnread(messages: readonly Message[], readThrough: MessageId | null): boolean {
+  const last = messages.at(-1)
+  return last?.from === 'agent' && (readThrough === null || last.id > readThrough)
 }

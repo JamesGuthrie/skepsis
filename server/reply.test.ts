@@ -124,6 +124,46 @@ describe('postReply', () => {
   })
 })
 
+describe('POST /api/threads/:id/read', () => {
+  const read = (id: string, body: unknown) =>
+    fetch(`${server.url}/api/threads/${id}/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: server.token },
+      body: JSON.stringify(body),
+    })
+  const thread = async () =>
+    (
+      (await (
+        await fetch(`${server.url}/api/threads`, {
+          headers: { [TOKEN_HEADER]: server.token },
+        })
+      ).json()) as ThreadsResponse
+    ).threads[0]!
+
+  it('marks the thread read through the message', async () => {
+    await postReply(server.access, 'c1', 'because')
+    const {
+      messages: [reply],
+      unread,
+    } = await thread()
+    expect(unread).toBe(true)
+    expect((await read('c1', { through: reply!.id })).status).toBe(200)
+    expect((await thread()).unread).toBe(false)
+  })
+
+  it('404s for an unknown thread or message', async () => {
+    await postReply(server.access, 'c1', 'because')
+    const { id } = (await thread()).messages[0]!
+    expect((await read('c9', { through: id })).status).toBe(404)
+    expect((await read('c1', { through: id + 1 })).status).toBe(404)
+  })
+
+  it('400s for a malformed body', async () => {
+    expect((await read('c1', {})).status).toBe(400)
+    expect((await read('c1', { through: 'one' })).status).toBe(400)
+  })
+})
+
 /** Run `sh -c command` with `stdin`, for its exit status and output */
 function sh(command: string, stdin = '') {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
