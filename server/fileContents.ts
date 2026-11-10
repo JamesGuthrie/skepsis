@@ -9,7 +9,7 @@
 import { spawn } from 'node:child_process'
 import { lstat, readFile, readlink } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { DiffArgs, FileContentsResponse } from '../shared/types.ts'
+import type { RevisionId, FileContentsResponse, Snapshot } from '../shared/types.ts'
 
 /**
  * Run a command and return stdout, or null if it exits nonzero. A nonzero exit
@@ -29,19 +29,25 @@ function tryRun(cmd: string, args: string[]): Promise<string | null> {
   })
 }
 
-/** Fetch a file's contents at the diff's left revision. */
-function fetchOld(src: DiffArgs, oldPath: string): Promise<string | null> {
-  if (!src.endpoints) return Promise.resolve(null)
-  const { left } = src.endpoints
-  return src.vcs === 'jj'
-    ? tryRun('jj', ['file', 'show', '-r', left, '--', oldPath])
+/** Fetch a file's contents at the snapshot's left revision. */
+function fetchOld(
+  vcs: 'jj' | 'git',
+  left: RevisionId,
+  oldPath: string,
+): Promise<string | null> {
+  return vcs === 'jj'
+    ? tryRun('jj', ['--ignore-working-copy', 'file', 'show', '-r', left, '--', oldPath])
     : tryRun('git', ['show', `${left}:${oldPath}`])
 }
 
-/** Fetch a file's contents at the diff's right (new) endpoint. */
-async function fetchNew(src: DiffArgs, path: string, cwd: string): Promise<string | null> {
-  if (!src.endpoints) return null
-  const { right } = src.endpoints
+/** Fetch a file's contents at the snapshot's right revision, or from disk when
+ *  the diff ends at the working tree. */
+async function fetchNew(
+  vcs: 'jj' | 'git',
+  right: Snapshot['right'],
+  path: string,
+  cwd: string,
+): Promise<string | null> {
   if (right === 'workingCopy') {
     const abs = join(cwd, path)
     const stat = await lstat(abs).catch(() => null)
@@ -50,25 +56,26 @@ async function fetchNew(src: DiffArgs, path: string, cwd: string): Promise<strin
     }
     return readFile(abs, 'utf-8').catch(() => null)
   }
-  return src.vcs === 'jj'
-    ? tryRun('jj', ['file', 'show', '-r', right.rev, '--', path])
-    : tryRun('git', ['show', `${right.rev}:${path}`])
+  return vcs === 'jj'
+    ? tryRun('jj', ['--ignore-working-copy', 'file', 'show', '-r', right, '--', path])
+    : tryRun('git', ['show', `${right}:${path}`])
 }
 
 /**
- * Full file contents at both diff endpoints, used by the client to build a
- * non-partial diff that supports hunk expansion. `oldPath` differs from `path`
- * for renamed files (the old-side path).
+ * Full file contents at both ends of a diff snapshot, used by the client to
+ * build a non-partial diff that supports hunk expansion. `oldPath` differs
+ * from `path` for renamed files (the old-side path).
  */
 export async function getFileContents(
-  src: DiffArgs,
+  vcs: 'jj' | 'git',
   cwd: string,
+  snapshot: Snapshot,
   path: string,
   oldPath?: string,
 ): Promise<FileContentsResponse> {
   const [oldContents, newContents] = await Promise.all([
-    fetchOld(src, oldPath ?? path),
-    fetchNew(src, path, cwd),
+    fetchOld(vcs, snapshot.left, oldPath ?? path),
+    fetchNew(vcs, snapshot.right, path, cwd),
   ])
   return { oldContents, newContents }
 }

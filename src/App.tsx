@@ -14,6 +14,8 @@ import {
   useMutation,
   useQueryClient,
   keepPreviousData,
+  queryOptions,
+  skipToken,
 } from '@tanstack/react-query'
 import {
   Fragment,
@@ -53,6 +55,7 @@ import type {
   DiffHashResponse,
   DiffResponse,
   SendRequest,
+  Snapshot,
   Side,
   Thread,
   ThreadsResponse,
@@ -194,6 +197,30 @@ async function apiFetch<T = unknown>(
     throw new ApiError(err?.error ?? `Request failed (${res.status})`, res.status)
   }
   return res.json() as Promise<T>
+}
+
+/** Full contents of a file at both ends of the diff, for hunk expansion. The
+ *  snapshot is in the key and the request, so contents always come from the
+ *  revisions the page's patch was diffed between, even after a rebase. Null
+ *  means the diff can't be expanded. */
+function fileContentsQuery(
+  file: FileDiffMetadata,
+  hash: string | undefined,
+  snapshot: Snapshot | null,
+) {
+  const params = new URLSearchParams({ path: file.name })
+  if (file.prevName) params.set('oldPath', file.prevName)
+  if (snapshot) {
+    params.set('left', snapshot.left)
+    if (snapshot.right !== 'workingCopy') params.set('right', snapshot.right)
+  }
+  return queryOptions({
+    queryKey: ['file-contents', file.name, hash, snapshot?.left, snapshot?.right] as const,
+    queryFn: snapshot
+      ? () => apiFetch<FileContentsResponse>(`/api/file-contents?${params}`)
+      : skipToken,
+    staleTime: Infinity,
+  })
 }
 
 const wideQuery = '(min-width: 1060px)'
@@ -2057,20 +2084,17 @@ function DiffView() {
   // file stays a partial diff, and Shiki tokenizes only its patch lines: inside
   // a construct the patch truncates (a JSON object, a block comment) colors can
   // differ from the full-file result until the file is expanded.
-  const expandable = data?.expandable ?? false
+  const snapshot = data?.snapshot ?? null
+  const expandable = snapshot !== null
 
   // The fetch behind `loadDiffFiles`. Routed through react-query's cache (keyed
-  // by content hash, same key as the expand-all queries below) so the two
-  // expansion paths share one request per file version.
+  // by content hash and snapshot, same key as the expand-all queries below) so
+  // the two expansion paths share one request per file version.
   const fetchContents = useCallback(
     (file: FileDiffMetadata) => {
-      const params = new URLSearchParams({ path: file.name })
-      if (file.prevName) params.set('oldPath', file.prevName)
-      return qc.fetchQuery({
-        queryKey: ['file-contents', file.name, data?.fileHashes[file.name]] as const,
-        queryFn: () => apiFetch<FileContentsResponse>(`/api/file-contents?${params}`),
-        staleTime: Infinity,
-      })
+      return qc.fetchQuery(
+        fileContentsQuery(file, data?.fileHashes[file.name], data?.snapshot ?? null),
+      )
     },
     [qc, data],
   )
@@ -2084,17 +2108,10 @@ function DiffView() {
   // still get fetched here and re-parsed at whole-file context. Only files the
   // user actually expanded are fetched.
   const contentQueries = useQueries({
-    queries: patchFiles.map((f) => {
-      const hash = data?.fileHashes[f.name]
-      const params = new URLSearchParams({ path: f.name })
-      if (f.prevName) params.set('oldPath', f.prevName)
-      return {
-        queryKey: ['file-contents', f.name, hash] as const,
-        queryFn: () => apiFetch<FileContentsResponse>(`/api/file-contents?${params}`),
-        enabled: expandable && f.hunks.length > 0 && (expandedFiles[f.name] ?? false),
-        staleTime: Infinity,
-      }
-    }),
+    queries: patchFiles.map((f) => ({
+      ...fileContentsQuery(f, data?.fileHashes[f.name], snapshot),
+      enabled: f.hunks.length > 0 && (expandedFiles[f.name] ?? false),
+    })),
   })
 
   // Map of loaded contents by file name, and the files whose contents are

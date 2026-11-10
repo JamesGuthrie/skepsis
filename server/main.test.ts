@@ -11,12 +11,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type {
-  DiffArgs,
   DiffHashResponse,
   DiffResponse,
   FileContentsResponse,
+  Snapshot,
 } from '../shared/types.ts'
 import { TOKEN_HEADER } from '../shared/types.ts'
+import type { DiffSpec } from './diffSource.ts'
 import { exec, isolateVcsConfig, requireJj } from './testUtil.ts'
 
 // HOME is also where viewed state is stored, and it's read at module load —
@@ -77,20 +78,15 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
     process.chdir(dir)
 
     const base = { toWorkingCopy: true, files: [] }
-    const diffSource: DiffArgs =
+    const diffSource: DiffSpec =
       vcs === 'git'
         ? {
             vcs,
-            args: ['HEAD'],
+            range: { kind: 'fromTo', from: 'HEAD', to: 'workingCopy' },
             ...base,
-            endpoints: { left: 'HEAD', right: 'workingCopy' },
+            displayArgs: ['HEAD'],
           }
-        : {
-            vcs,
-            args: ['-r', '@'],
-            ...base,
-            endpoints: { left: '@-', right: { rev: '@' } },
-          }
+        : { vcs, range: { kind: 'single', rev: '@' }, ...base, displayArgs: ['-r', '@'] }
     const started = await startServer({ diffSource, cwd: dir })
     close = started.close
     token = started.token
@@ -107,6 +103,16 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
     const res = await authed(`${url}/api/diff`)
     expect(res.status).toBe(200)
     return res.json()
+  }
+
+  /** Fetch file contents the way the page does: at the snapshot of the diff
+   *  it shows, by default the current one. */
+  async function fileContents(query: string, snapshot?: Snapshot): Promise<Response> {
+    const { left, right } = snapshot ?? (await getDiffResponse()).snapshot!
+    const params = new URLSearchParams(query)
+    params.set('left', left)
+    if (right !== 'workingCopy') params.set('right', right)
+    return authed(`${url}/api/file-contents?${params}`)
   }
 
   async function api(method: string, path: string, body: unknown): Promise<Response> {
@@ -131,7 +137,7 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
     const diff = await getDiffResponse()
     expect(diff.vcs).toBe(vcs)
     expect(diff.commentsEnabled).toBe(true)
-    expect(diff.expandable).toBe(true)
+    expect(diff.snapshot).not.toBeNull()
     expect(diff.patch).toContain('diff --git a/f.txt b/f.txt')
     expect(diff.patch).toContain('+world')
     // The per-file hash is the (abbreviated) git blob ID of the new contents —
@@ -256,7 +262,7 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
   })
 
   it('serves full file contents at both diff endpoints', async () => {
-    const res = await authed(`${url}/api/file-contents?path=f.txt`)
+    const res = await fileContents('path=f.txt')
     expect(res.status).toBe(200)
     const contents: FileContentsResponse = await res.json()
     expect(contents.oldContents).toBe('hello\n')
@@ -264,12 +270,12 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
   })
 
   it('returns null for the missing side of added and deleted files', async () => {
-    let res = await authed(`${url}/api/file-contents?path=added.txt`)
+    let res = await fileContents('path=added.txt')
     expect((await res.json()) as FileContentsResponse).toEqual({
       oldContents: null,
       newContents: 'new\n',
     })
-    res = await authed(`${url}/api/file-contents?path=del.txt`)
+    res = await fileContents('path=del.txt')
     expect((await res.json()) as FileContentsResponse).toEqual({
       oldContents: 'bye\n',
       newContents: null,
@@ -277,7 +283,7 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
   })
 
   it('serves old contents via oldPath for renamed files', async () => {
-    const res = await authed(`${url}/api/file-contents?path=r2.txt&oldPath=r.txt`)
+    const res = await fileContents('path=r2.txt&oldPath=r.txt')
     expect(res.status).toBe(200)
     expect((await res.json()) as FileContentsResponse).toEqual({
       oldContents: 'rename me\n',
@@ -286,7 +292,7 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
   })
 
   it('serves contents of a file whose name starts with a dash', async () => {
-    const res = await authed(`${url}/api/file-contents?path=-dash.txt`)
+    const res = await fileContents('path=-dash.txt')
     expect((await res.json()) as FileContentsResponse).toEqual({
       oldContents: 'old\n',
       newContents: 'new\n',
@@ -296,6 +302,14 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
   it('rejects malformed requests', async () => {
     const res = await api('POST', '/api/viewed', { file: 'f.txt' }) // missing hash
     expect(res.status).toBe(400)
+  })
+
+  it('only serves file contents at a snapshot of full commit ids', async () => {
+    const queries = ['path=f.txt', 'path=f.txt&left=HEAD', 'path=f.txt&left=--output=x']
+    const responses = await Promise.all(
+      queries.map((query) => authed(`${url}/api/file-contents?${query}`)),
+    )
+    expect(responses.map((res) => res.status)).toEqual([400, 400, 400])
   })
 
   // Last in the block: it edits f.txt and commits, which the tests above
@@ -322,6 +336,7 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
     await appendFile(join(dir, 'f.txt'), 'edited by someone else\n')
     const edited = await diffHash()
     expect(edited).not.toBe(before)
+    const shown = (await getDiffResponse()).snapshot!
 
     // Moving the diff's endpoint changes it too: the diff is of HEAD (git) or
     // @ (jj), and both now point at an empty change.
@@ -332,22 +347,52 @@ describe.each(['git', 'jj'] as const)('startServer (%s integration)', (vcs) => {
       await run('jj', ['new'])
     }
     expect(await diffHash()).not.toBe(edited)
+
+    // The new diff starts from the moved endpoint, but a page still showing
+    // the old diff expands against the commits that diff came from.
+    const moved = (await getDiffResponse()).snapshot!
+    expect(moved.left).not.toBe(shown.left)
+    const at = async (snapshot: Snapshot) =>
+      ((await (await fileContents('path=f.txt', snapshot)).json()) as FileContentsResponse)
+        .oldContents
+    expect(await at(shown)).toBe('hello\n')
+    expect(await at(moved)).toBe(await readFile(join(dir, 'f.txt'), 'utf-8'))
   })
 
   // Bad diff args should fail startServer itself, before the first /api/diff.
   it('startServer rejects when the diff command fails', async () => {
-    const badSource: DiffArgs =
-      vcs === 'git'
-        ? { vcs, args: ['not-a-ref'], toWorkingCopy: true, files: [], endpoints: null }
-        : {
-            vcs,
-            args: ['-r', 'no_such_rev'],
-            toWorkingCopy: true,
-            files: [],
-            endpoints: null,
-          }
+    const args = vcs === 'git' ? ['not-a-ref'] : ['-r', 'no_such_rev']
+    const badSource: DiffSpec = {
+      vcs,
+      range: { kind: 'opaque', args },
+      toWorkingCopy: true,
+      files: [],
+      displayArgs: args,
+    }
     await expect(startServer({ diffSource: badSource, cwd: dir })).rejects.toThrow(
       /diff failed/,
+    )
+  })
+
+  it('startServer rejects when a revision does not resolve', async () => {
+    const badSource: DiffSpec =
+      vcs === 'git'
+        ? {
+            vcs,
+            range: { kind: 'fromTo', from: 'not-a-ref', to: 'workingCopy' },
+            toWorkingCopy: true,
+            files: [],
+            displayArgs: ['not-a-ref'],
+          }
+        : {
+            vcs,
+            range: { kind: 'single', rev: 'no_such_rev' },
+            toWorkingCopy: false,
+            files: [],
+            displayArgs: ['-r', 'no_such_rev'],
+          }
+    await expect(startServer({ diffSource: badSource, cwd: dir })).rejects.toThrow(
+      /Could not resolve '(not-a-ref|no_such_rev)'/,
     )
   })
 })

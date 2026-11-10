@@ -11,8 +11,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DiffArgs, SendRequest, ThreadsResponse } from '../shared/types.ts'
+import type { SendRequest, ThreadsResponse } from '../shared/types.ts'
 import { TOKEN_HEADER } from '../shared/types.ts'
+import type { DiffSpec } from './diffSource.ts'
 import { isolateVcsConfig } from './testUtil.ts'
 import { postReply } from './reply.ts'
 import type { ReplyAccess, ReplyToken } from './reply.ts'
@@ -37,12 +38,12 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
-const jj: DiffArgs = {
+const jj: DiffSpec = {
   vcs: 'jj',
-  args: ['-r', '@-'],
+  range: { kind: 'opaque', args: ['-r', '@-'] },
   toWorkingCopy: false,
   files: [],
-  endpoints: null,
+  displayArgs: ['-r', '@-'],
 }
 
 const comment: SendRequest = {

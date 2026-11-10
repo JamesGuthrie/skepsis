@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { DiffArgs } from '../shared/types.ts'
+import type { RevisionId, Snapshot } from '../shared/types.ts'
 import { getFileContents } from './fileContents.ts'
 import { insertComment } from './comment.ts'
 import { exec, isolateVcsConfig } from './testUtil.ts'
@@ -29,13 +29,7 @@ describe('symlinks', () => {
   let dir: string
   let origCwd: string
 
-  const src: DiffArgs = {
-    vcs: 'git',
-    args: ['HEAD'],
-    toWorkingCopy: true,
-    files: [],
-    endpoints: { left: 'HEAD', right: 'workingCopy' },
-  }
+  let snapshot: Snapshot
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), 'skepsis-symlink-test-'))
@@ -45,6 +39,8 @@ describe('symlinks', () => {
     await writeFile(join(dir, 'real.txt'), 'hello\n')
     await run('git', ['add', '.'])
     await run('git', ['commit', '-qm', 'init'])
+    const { stdout } = await run('git', ['rev-parse', 'HEAD'])
+    snapshot = { left: stdout.trim() as RevisionId, right: 'workingCopy' }
     // Turn the regular file into a symlink to another tracked file.
     await unlink(join(dir, 'real.txt'))
     await symlink('target.txt', join(dir, 'real.txt'))
@@ -60,7 +56,7 @@ describe('symlinks', () => {
   })
 
   it('serves the link target as the new contents, not the followed file', async () => {
-    const contents = await getFileContents(src, dir, 'real.txt')
+    const contents = await getFileContents('git', dir, snapshot, 'real.txt')
     expect(contents.oldContents).toBe('hello\n')
     expect(contents.newContents).toBe('target.txt')
   })

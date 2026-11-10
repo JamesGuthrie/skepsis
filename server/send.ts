@@ -11,7 +11,8 @@
 // added, but removing or changing one is a major version.
 
 import { spawn } from 'node:child_process'
-import type { CommentId, DiffArgs, SendRequest } from '../shared/types.ts'
+import type { CommentId, SendRequest } from '../shared/types.ts'
+import type { DiffSpec } from './diffSource.ts'
 import { displayCommand } from './displayCommand.ts'
 import { replyCommand } from './reply.ts'
 import type { ReplyAccess, ReplyToken } from './reply.ts'
@@ -62,7 +63,7 @@ export interface SendPayload {
 }
 
 export function buildPayload(
-  diffSource: DiffArgs,
+  diffSource: DiffSpec,
   root: string,
   input: SendRequest,
   thread: { id: CommentId; followUp: boolean },

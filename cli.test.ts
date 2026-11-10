@@ -111,7 +111,7 @@ describe('--interdiff', () => {
     expect(data.patch).toContain('+d')
     expect(data.patch).not.toContain('up.txt')
     expect(data.interdiff).toBe(true)
-    expect(data.expandable).toBe(false)
+    expect(data.snapshot).toBeNull()
   })
 
   // -t defaults to @, which is newCommit: the diff ends at the working copy,

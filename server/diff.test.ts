@@ -11,11 +11,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parsePatchFiles } from '@pierre/diffs'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { DiffArgs } from '../shared/types.ts'
 import { diffCommand, extractFileHashes, normalizeJjRenames } from './diff.ts'
+import type { ResolvedDiff } from './diffSource.ts'
 import { isolateVcsConfig, requireJj, run } from './testUtil.ts'
 
-const base = { toWorkingCopy: true, files: [], endpoints: null }
+const base = { interdiff: false, files: [], snapshot: null }
 
 const home = await isolateVcsConfig()
 afterAll(async () => {
@@ -108,7 +108,7 @@ describe('jj show-path-prefix override (integration)', () => {
   })
 
   it('limits the diff to files passed after --', async () => {
-    const src: DiffArgs = { vcs: 'jj', args: ['-r', '@'], ...base, files: ['f.txt'] }
+    const src: ResolvedDiff = { vcs: 'jj', args: ['-r', '@'], ...base, files: ['f.txt'] }
     const { cmd, args } = diffCommand(src)
     const { stdout } = await run(cmd, args, repo)
     expect(stdout).toContain('diff --git a/f.txt b/f.txt')

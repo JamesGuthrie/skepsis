@@ -10,8 +10,9 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DiffArgs, DiffHashResponse, ErrorResponse } from '../shared/types.ts'
+import type { DiffHashResponse, ErrorResponse } from '../shared/types.ts'
 import { TOKEN_HEADER } from '../shared/types.ts'
+import type { DiffSpec } from './diffSource.ts'
 import { isolateVcsConfig } from './testUtil.ts'
 import type * as DiffModule from './diff.ts'
 
@@ -31,12 +32,12 @@ afterAll(async () => {
   await rm(home, { recursive: true, force: true })
 })
 
-const diffSource: DiffArgs = {
+const diffSource: DiffSpec = {
   vcs: 'git',
-  args: ['HEAD'],
+  range: { kind: 'opaque', args: ['HEAD'] },
   toWorkingCopy: false,
   files: [],
-  endpoints: null,
+  displayArgs: ['HEAD'],
 }
 
 const result = (patch: string) => ({ patch, fileHashes: {} })

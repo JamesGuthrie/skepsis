@@ -12,13 +12,13 @@ import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   CommentId,
-  DiffArgs,
   DiffResponse,
   ErrorResponse,
   SendRequest,
   ThreadsResponse,
 } from '../shared/types.ts'
 import { REPLY_TOKEN_HEADER, TOKEN_HEADER } from '../shared/types.ts'
+import type { DiffSpec } from './diffSource.ts'
 import { isolateVcsConfig } from './testUtil.ts'
 import { buildPayload, renderPrompt, runSend } from './send.ts'
 import type { SendPayload } from './send.ts'
@@ -42,12 +42,12 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
-const jj: DiffArgs = {
+const jj: DiffSpec = {
   vcs: 'jj',
-  args: ['-r', '@-'],
+  range: { kind: 'opaque', args: ['-r', '@-'] },
   toWorkingCopy: false,
   files: [],
-  endpoints: null,
+  displayArgs: ['-r', '@-'],
 }
 
 const comment: SendRequest = {

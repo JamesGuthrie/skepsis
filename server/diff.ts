@@ -8,9 +8,10 @@
 
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import type { DiffArgs, FileHashes } from '../shared/types.ts'
+import type { FileHashes } from '../shared/types.ts'
+import type { ResolvedDiff } from './diffSource.ts'
 
-function run(
+export function run(
   cmd: string,
   args: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -52,17 +53,23 @@ const GIT_PREFIX_OVERRIDE = [
 ]
 const JJ_PREFIX_OVERRIDE = ['--config', 'diff.git.show-path-prefix=true']
 
-/** `interdiff` or `diff`, the subcommand that produces the patch */
-export function subcommand(src: DiffArgs): string {
-  return src.interdiff ? 'interdiff' : 'diff'
+/** `interdiff` or `diff`, the jj subcommand that produces the patch */
+export function subcommand(interdiff: boolean): 'diff' | 'interdiff' {
+  return interdiff ? 'interdiff' : 'diff'
 }
 
-export function diffCommand(src: DiffArgs): { cmd: string; args: string[] } {
+export function diffCommand(src: ResolvedDiff): { cmd: string; args: string[] } {
   const fileArgs = src.files.length > 0 ? ['--', ...src.files] : []
   if (src.vcs === 'jj') {
     return {
       cmd: 'jj',
-      args: [...JJ_PREFIX_OVERRIDE, subcommand(src), ...src.args, '--git', ...fileArgs],
+      args: [
+        ...JJ_PREFIX_OVERRIDE,
+        subcommand(src.interdiff),
+        ...src.args,
+        '--git',
+        ...fileArgs,
+      ],
     }
   } else {
     return {
@@ -108,12 +115,12 @@ export function normalizeJjRenames(patch: string): string {
 }
 
 export async function getDiff(
-  src: DiffArgs,
+  src: ResolvedDiff,
 ): Promise<{ patch: string; fileHashes: FileHashes }> {
   const { cmd, args } = diffCommand(src)
   const { stdout, stderr, code } = await run(cmd, args)
   if (code !== 0) {
-    throw new Error(`${cmd} ${subcommand(src)} failed (exit ${code}): ${stderr}`)
+    throw new Error(`${cmd} ${subcommand(src.interdiff)} failed (exit ${code}): ${stderr}`)
   }
   const patch = src.vcs === 'jj' ? normalizeJjRenames(stdout) : stdout
   return { patch, fileHashes: extractFileHashes(patch, src.interdiff) }

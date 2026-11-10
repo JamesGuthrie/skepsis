@@ -13,8 +13,9 @@ import { serveStatic } from '@hono/node-server/serve-static'
 import { zValidator } from '@hono/zod-validator'
 import { basename, join, relative } from 'node:path'
 import { readFile } from 'node:fs/promises'
-import type { DiffArgs } from '../shared/types.ts'
 import { getDiff, patchHash } from './diff.ts'
+import { isInterdiff, resolveDiff } from './diffSource.ts'
+import type { DiffSpec } from './diffSource.ts'
 import { displayCommand } from './displayCommand.ts'
 import { getFileContents } from './fileContents.ts'
 import { getGeneratedFiles } from './generated.ts'
@@ -63,7 +64,7 @@ export interface SendTarget {
 }
 
 export async function startServer(opts: {
-  diffSource: DiffArgs
+  diffSource: DiffSpec
   port?: number
   hostname?: string
   cwd: string
@@ -76,8 +77,9 @@ export async function startServer(opts: {
 }): Promise<{ port: number; token: string; close: () => void }> {
   const { diffSource, port = 0, hostname = 'localhost', cwd, poll = true, send } = opts
   // Fail fast on bad args by running the exact diff command we'll serve.
-  // Result is discarded: /api/diff re-runs it per request to stay fresh.
-  await getDiff(diffSource)
+  // Result is discarded: /api/diff resolves and re-runs it per request to
+  // stay fresh.
+  await getDiff(await resolveDiff(diffSource))
 
   const app = new Hono()
   const token = newToken()
@@ -110,10 +112,11 @@ export async function startServer(opts: {
   // An interdiff that ends at the working copy still can't take comments: a
   // changed description shows as a file named JJ-COMMIT-DESCRIPTION, which a
   // comment would create on disk.
-  const commentsEnabled = diffSource.toWorkingCopy && !diffSource.interdiff
+  const commentsEnabled = diffSource.toWorkingCopy && !isInterdiff(diffSource)
 
   app.get('/api/diff', async (c) => {
-    const { patch, fileHashes } = await getDiff(diffSource)
+    const resolved = await resolveDiff(diffSource)
+    const { patch, fileHashes } = await getDiff(resolved)
     const files = Object.keys(fileHashes)
     const [viewed, generated, commentSyntaxes] = await Promise.all([
       loadViewed(cwd, fileHashes),
@@ -125,9 +128,9 @@ export async function startServer(opts: {
       revset: displayCommand(diffSource),
       repo: basename(cwd),
       vcs: diffSource.vcs,
-      interdiff: !!diffSource.interdiff,
+      interdiff: isInterdiff(diffSource),
       commentsEnabled,
-      expandable: diffSource.endpoints !== null,
+      snapshot: resolved.snapshot,
       fileHashes,
       patchHash: patchHash(patch),
       poll,
@@ -149,7 +152,8 @@ export async function startServer(opts: {
     if (!poll)
       return c.json({ error: 'polling is off (--no-poll)' } satisfies ErrorResponse, 404)
     if (!hashInFlight) {
-      const run = getDiff(diffSource)
+      const run = resolveDiff(diffSource)
+        .then(getDiff)
         .then(({ patch }) => patchHash(patch))
         .finally(() => {
           if (hashInFlight === run) hashInFlight = null
@@ -160,8 +164,8 @@ export async function startServer(opts: {
   })
 
   app.get('/api/file-contents', zValidator('query', fileContentsQuerySchema), async (c) => {
-    const { path, oldPath } = c.req.valid('query')
-    const contents = await getFileContents(diffSource, cwd, path, oldPath)
+    const { path, oldPath, snapshot } = c.req.valid('query')
+    const contents = await getFileContents(diffSource.vcs, cwd, snapshot, path, oldPath)
     return c.json(contents satisfies FileContentsResponse)
   })
 

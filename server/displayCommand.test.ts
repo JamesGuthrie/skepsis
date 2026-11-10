@@ -7,58 +7,53 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { DiffArgs } from '../shared/types.ts'
+import type { DiffSpec } from './diffSource.ts'
 import { displayCommand } from './displayCommand.ts'
 
-const base = { toWorkingCopy: true, files: [], endpoints: null }
+const git = (displayArgs: string[], files: string[] = []): DiffSpec => ({
+  vcs: 'git',
+  range: { kind: 'opaque', args: displayArgs },
+  toWorkingCopy: true,
+  files,
+  displayArgs,
+})
 
 describe('displayCommand', () => {
   it('leaves plain args unquoted', () => {
-    const src: DiffArgs = { vcs: 'git', args: ['--merge-base', 'origin/main'], ...base }
-    expect(displayCommand(src)).toBe('git diff --merge-base origin/main')
+    expect(displayCommand(git(['--merge-base', 'origin/main']))).toBe(
+      'git diff --merge-base origin/main',
+    )
   })
 
   it('quotes args with shell metacharacters so the command is runnable', () => {
-    const src: DiffArgs = {
+    const src: DiffSpec = {
       vcs: 'jj',
-      args: ['--from', 'fork_point(trunk() | @)'],
-      ...base,
+      range: { kind: 'fromTo', from: 'fork_point(trunk() | @)', to: '@' },
+      toWorkingCopy: true,
+      files: [],
+      displayArgs: ['--from', 'fork_point(trunk() | @)'],
     }
     expect(displayCommand(src)).toBe("jj diff --from 'fork_point(trunk() | @)'")
   })
 
   it('escapes single quotes inside quoted args', () => {
-    const src: DiffArgs = { vcs: 'git', args: ["it's"], ...base }
-    expect(displayCommand(src)).toBe(String.raw`git diff 'it'\''s'`)
-  })
-
-  it('prefers displayArgs over args when present', () => {
-    const src: DiffArgs = {
-      vcs: 'git',
-      args: ['0123456789abcdef0123456789abcdef01234567'],
-      displayArgs: ['--merge-base', 'origin/main'],
-      ...base,
-    }
-    expect(displayCommand(src)).toBe('git diff --merge-base origin/main')
+    expect(displayCommand(git(["it's"]))).toBe(String.raw`git diff 'it'\''s'`)
   })
 
   it('shows jj interdiff as such', () => {
-    const src: DiffArgs = {
+    const src: DiffSpec = {
       vcs: 'jj',
-      interdiff: true,
-      args: ['--from', 'a', '--to', 'b'],
-      ...base,
+      range: { kind: 'interdiff', from: 'a', to: 'b' },
+      toWorkingCopy: false,
+      files: [],
+      displayArgs: ['--from', 'a', '--to', 'b'],
     }
     expect(displayCommand(src)).toBe('jj interdiff --from a --to b')
   })
 
   it('quotes file paths after --', () => {
-    const src: DiffArgs = {
-      vcs: 'git',
-      args: ['main'],
-      ...base,
-      files: ['src/app.ts', 'my file.txt'],
-    }
-    expect(displayCommand(src)).toBe("git diff main -- src/app.ts 'my file.txt'")
+    expect(displayCommand(git(['main'], ['src/app.ts', 'my file.txt']))).toBe(
+      "git diff main -- src/app.ts 'my file.txt'",
+    )
   })
 })

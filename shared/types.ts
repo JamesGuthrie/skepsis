@@ -84,11 +84,26 @@ export const commentDeleteSchema = z.object({
   line: z.number(),
 })
 
-export const fileContentsQuerySchema = z.object({
-  path: z.string(),
-  // Present for renamed files: the path to fetch the old-side content from.
-  oldPath: z.string().optional(),
-})
+/** A full hex object id, so it can't pass for an option or a revset. */
+const revisionIdSchema = z
+  .string()
+  .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+  .transform((id) => id as RevisionId)
+
+export const fileContentsQuerySchema = z
+  .object({
+    path: z.string(),
+    // Present for renamed files: the path to fetch the old-side content from.
+    oldPath: z.string().optional(),
+    // The snapshot of the diff the page shows, so expansion reads the same
+    // revisions as its patch. No `right` means the working copy.
+    left: revisionIdSchema,
+    right: revisionIdSchema.optional(),
+  })
+  .transform(({ left, right, ...rest }) => ({
+    ...rest,
+    snapshot: { left, right: right ?? 'workingCopy' } satisfies Snapshot,
+  }))
 
 // --- Request types (inferred from schemas) ---
 
@@ -150,30 +165,18 @@ export interface ThemeResponse {
 
 // --- VCS types ---
 
-/**
- * Concrete revisions at the two ends of the diff, used to fetch full file
- * contents for hunk expansion. `null` when the diff args can't be resolved to
- * concrete endpoints (exotic revsets) — expansion is disabled in that case.
- * The right side is `'workingCopy'` when the diff ends at the working tree
- * (git only; in jj the working copy is the real revision `@`).
- */
-export type DiffEndpoints = {
-  left: string
-  right: { rev: string } | 'workingCopy'
-} | null
+/** The full object id of a fixed revision: a commit, or in git a tree, since
+ *  a git diff can start from a bare tree such as the empty tree. */
+export type RevisionId = string & { readonly __brand: 'RevisionId' }
 
-export type DiffArgs = ({ vcs: 'jj'; args: string[] } | { vcs: 'git'; args: string[] }) & {
-  /** Run `jj interdiff` rather than `jj diff` (the CLI only allows it with jj) */
-  interdiff?: boolean
-  /** Whether the diff ends at the working copy, which review comments need */
-  toWorkingCopy: boolean
-  files: string[]
-  endpoints: DiffEndpoints
-  /** Args to show in the UI/log command string in place of `args`, for when
-   *  the executed args (e.g., a resolved sha) are less readable than the
-   *  user-facing form. */
-  displayArgs?: string[]
-}
+/**
+ * The revisions at the two ends of one diff response. The page sends it back
+ * to /api/file-contents, so hunk expansion reads the revisions its patch came
+ * from even if a branch has moved since. The right side is `'workingCopy'`
+ * when the diff ends at the working tree (git only; in jj the working copy is
+ * the real commit `@`).
+ */
+export type Snapshot = { left: RevisionId; right: RevisionId | 'workingCopy' }
 
 // --- Response types (checked via satisfies on the server) ---
 
@@ -190,9 +193,10 @@ export interface DiffResponse {
    *  expansion */
   interdiff: boolean
   commentsEnabled: boolean
-  /** Whether diff endpoints resolved, so /api/file-contents can serve full
-   *  file contents for hunk expansion. */
-  expandable: boolean
+  /** The revisions this patch was diffed between, for /api/file-contents to
+   *  serve full file contents for hunk expansion. Null when the range has no
+   *  single pair of endpoints, which disables expansion. */
+  snapshot: Snapshot | null
   fileHashes: FileHashes
   /** Hash of `patch`, compared against /api/diff-hash to notice changes. */
   patchHash: string
