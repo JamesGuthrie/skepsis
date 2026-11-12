@@ -73,7 +73,11 @@ beforeEach(async () => {
   const { port, token, close } = await startServer({
     diffSource: jj,
     cwd: dir,
-    send: { command: `cat > ${out}`, replies: { skepsis: [process.execPath, CLI] } },
+    send: {
+      kind: 'command',
+      command: `cat > ${out}`,
+      replies: { skepsis: [process.execPath, CLI] },
+    },
   })
   const url = `http://localhost:${port}`
   const res = await fetch(`${url}/api/send`, {

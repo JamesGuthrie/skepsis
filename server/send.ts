@@ -192,10 +192,27 @@ const MAX_OUTPUT = 64 * 1024
 export function runSend(
   command: string,
   payload: SendPayload,
+  opts: RunOptions,
+): Promise<SendResult> {
+  return runProcess(
+    ['sh', '-c', command],
+    JSON.stringify(payload) + '\n',
+    '--send command',
+    opts,
+  )
+}
+
+/** Run `argv` with `stdin` on its stdin. Exit 0 is success; anything else, or
+ *  running past the timeout, is an error. `label` names the process in
+ *  errors that have no stderr to show. */
+export function runProcess(
+  [file, ...args]: readonly [string, ...string[]],
+  stdin: string,
+  label: string,
   { env, cwd, timeoutMs = TIMEOUT_MS, maxOutput = MAX_OUTPUT }: RunOptions,
 ): Promise<SendResult> {
   return new Promise((resolve) => {
-    const child = spawn('sh', ['-c', command], {
+    const child = spawn(file, args, {
       cwd,
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -235,18 +252,18 @@ export function runSend(
       if (timedOut) {
         resolve({
           ok: false,
-          error: `--send command timed out after ${timeoutMs / 1000} s`,
+          error: `${label} timed out after ${timeoutMs / 1000} s`,
         })
       } else if (code === 0) {
         resolve({ ok: true, output: stdout() })
       } else {
         const status = signal ? `was killed (${signal})` : `exited with ${code}`
-        resolve({ ok: false, error: stderr() || `--send command ${status}` })
+        resolve({ ok: false, error: stderr() || `${label} ${status}` })
       }
     })
     // A command that never reads stdin (`true`) closes the pipe early; that's
     // its business, not an error.
     child.stdin.on('error', () => {})
-    child.stdin.end(JSON.stringify(payload) + '\n')
+    child.stdin.end(stdin)
   })
 }

@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -157,10 +158,14 @@ afterAll(async () => {
 
 /** Start the CLI from `elsewhere` and resolve with the server's origin and
  *  page token once it prints its startup line. */
-function start(args: string[]): Promise<{ origin: string; token: string }> {
+function start(
+  args: string[],
+  env: Record<string, string | undefined> = process.env,
+): Promise<{ origin: string; token: string; line: string }> {
   return new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, [CLI, '--git', '--no-open', ...args], {
       cwd: elsewhere,
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     procs.push(proc)
@@ -172,6 +177,7 @@ function start(args: string[]): Promise<{ origin: string; token: string }> {
       if (m) {
         const url = new URL(m[1]!)
         resolve({
+          line: out.split('\n')[0]!,
           origin: url.origin,
           token: new URLSearchParams(url.hash.slice(1)).get('token')!,
         })
@@ -259,5 +265,119 @@ describe('-C', () => {
       { cwd: elsewhere },
     ).catch((e: { code: number; stderr: string }) => e)
     expect(r).toMatchObject({ code: 1, stderr: "--reply can't be used with -C\n" })
+  })
+})
+
+/** The environment with no agent session in it, plus `vars` */
+const env = (vars: Record<string, string> = {}) => {
+  const { CLAUDE_CODE_MESSAGING_SOCKET: _, CODEX_THREAD_ID: __, ...rest } = process.env
+  return { ...rest, ...vars }
+}
+
+const sendComment = ({ origin, token }: { origin: string; token: string }) =>
+  fetch(`${origin}/api/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', [TOKEN_HEADER]: token },
+    body: JSON.stringify({
+      file: 'a.ts',
+      side: 'additions',
+      lines: [1, 1],
+      columns: null,
+      code: null,
+      blob: null,
+      text: 'why?',
+    } satisfies SendRequest),
+  })
+
+describe('--agent-session', () => {
+  const fails = (args: string[], vars: Record<string, string> = {}) =>
+    exec(process.execPath, [CLI, '--git', '--no-open', '-C', gitRepo, ...args], {
+      cwd: elsewhere,
+      env: env(vars),
+    }).then(
+      () => ({ code: 0, stderr: '' }),
+      (e: { code: number; stderr: string }) => ({ code: e.code, stderr: e.stderr }),
+    )
+
+  // Unix socket paths are limited to about 100 bytes, which a realpath'd
+  // temporary directory on macOS nearly uses up.
+  let sockets: string
+  beforeAll(async () => {
+    sockets = await mkdtemp(join(tmpdir(), 'sk-'))
+  })
+  afterAll(async () => {
+    await rm(sockets, { recursive: true, force: true })
+  })
+
+  /** A fake Claude Code session socket, and the lines it has received */
+  async function session() {
+    const socket = join(sockets, `${Math.random().toString(36).slice(2)}.sock`)
+    const received: string[] = []
+    const server = createServer((conn) => {
+      let data = ''
+      conn.on('data', (d: Buffer) => (data += d.toString()))
+      conn.on('end', () => received.push(data))
+    })
+    await new Promise<void>((resolve) => server.listen(socket, resolve))
+    return { socket, received, close: () => server.close() }
+  }
+
+  it('needs an agent session', async () => {
+    expect(await fails(['--agent-session'])).toEqual({
+      code: 1,
+      stderr:
+        '--agent-session needs to run inside a Claude Code or Codex session\n' +
+        '(neither CLAUDE_CODE_MESSAGING_SOCKET nor CODEX_THREAD_ID is set).\n',
+    })
+  })
+
+  it("can't tell which of two sessions started it", async () => {
+    const r = await fails(['--agent-session'], {
+      CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/x.sock',
+      CODEX_THREAD_ID: 't1',
+    })
+    expect(r.code).toBe(1)
+    expect(r.stderr).toContain(
+      'found both CLAUDE_CODE_MESSAGING_SOCKET and CODEX_THREAD_ID',
+    )
+  })
+
+  it("can't be used with --send or --replies", async () => {
+    const vars = { CODEX_THREAD_ID: 't1' }
+    expect(await fails(['--agent-session', '--send', 'cat'], vars)).toEqual({
+      code: 1,
+      stderr: "--agent-session can't be used with --send\n",
+    })
+    expect(await fails(['--agent-session', '--replies'], vars)).toEqual({
+      code: 1,
+      stderr: "--agent-session can't be used with --replies\n",
+    })
+  })
+
+  it('sends to the session, not SKEPSIS_SEND, and says so', async () => {
+    const cc = await session()
+    const out = join(elsewhere, 'skepsis-send.out')
+    const server = await start(
+      ['-C', gitRepo, '--agent-session'],
+      env({ CLAUDE_CODE_MESSAGING_SOCKET: cc.socket, SKEPSIS_SEND: `cat > ${out}` }),
+    )
+    expect(server.line).toMatch(/, sending to Claude Code\)$/)
+    expect((await sendComment(server)).status).toBe(200)
+    await expect.poll(() => cc.received.length).toBe(1)
+    expect(cc.received[0]).toContain('why?')
+    await expect(readFile(out, 'utf8')).rejects.toThrow()
+    cc.close()
+  })
+
+  it('leaves the session alone without the flag', async () => {
+    const cc = await session()
+    const server = await start(
+      ['-C', gitRepo],
+      env({ CLAUDE_CODE_MESSAGING_SOCKET: cc.socket }),
+    )
+    expect(server.line).not.toContain('sending to')
+    expect((await diff(server)).send).toBe(null)
+    expect((await sendComment(server)).status).toBe(404)
+    cc.close()
   })
 })

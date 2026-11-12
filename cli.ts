@@ -17,6 +17,8 @@ import { buildDiffSource } from './server/diffSource.ts'
 import { openUrl } from './server/open.ts'
 import { postReply } from './server/reply.ts'
 import type { ReplyToken } from './server/reply.ts'
+import { CLAUDE_CODE_SOCKET_VAR, CODEX_THREAD_VAR, detectAgent } from './server/agent.ts'
+import type { Replies, SendTarget } from './server/main.ts'
 
 function parsePort(value: string): number {
   const port = /^\d+$/.test(value) ? Number(value) : NaN
@@ -60,6 +62,10 @@ const program = new Command()
     'let the agent --send delivers to answer comments in the page (each comment says how)',
   )
   .option(
+    '--agent-session',
+    'send comments to the Claude Code or Codex session that runs skepsis, which answers in the page',
+  )
+  .option(
     '--reply <comment-id>',
     'instead of serving a review, answer a sent comment with the text argument (- reads stdin)',
   )
@@ -78,7 +84,11 @@ const program = new Command()
       'or taking over 10 s, is an error, and stderr is shown.\n' +
       'See the README for the fields and recipes.\n\n' +
       'With --replies too, each comment ends with a `skepsis --reply` command\n' +
-      'the agent runs to answer it in the page, under the comment.',
+      'the agent runs to answer it in the page, under the comment.\n\n' +
+      'With --agent-session, Send goes to the agent session skepsis runs in\n' +
+      '(found through CLAUDE_CODE_MESSAGING_SOCKET or CODEX_THREAD_ID), with\n' +
+      'replies on. The agent should start skepsis in the background, since it\n' +
+      'runs until stopped.',
   )
   .parse()
 
@@ -104,6 +114,7 @@ async function reply(id: string): Promise<never> {
       ['interdiff', '--interdiff'],
       ['send', '--send'],
       ['replies', '--replies'],
+      ['agentSession', '--agent-session'],
       ['cwd', '-C'],
     ] as const
   ).filter(([key]) => opts[key] !== undefined)
@@ -151,12 +162,54 @@ if (opts.cwd !== undefined) {
   }
 }
 
-// The flag wins over the environment, and an empty value turns sending off.
-const send = (opts.send ?? process.env['SKEPSIS_SEND']) || null
-if (opts.replies && !send) fail('--replies needs --send (or SKEPSIS_SEND)')
+// The agent runs this to reply, so it names the same node and script this
+// run uses: skepsis may not be on its PATH (npx), or may be a different
+// version.
+const replies: Replies = { skepsis: [process.execPath, process.argv[1]!] }
+
+function agentTarget(): SendTarget {
+  const conflicting = (
+    [
+      ['send', '--send'],
+      ['replies', '--replies'],
+    ] as const
+  ).filter(([key]) => opts[key] !== undefined)
+  if (conflicting.length)
+    fail(
+      `--agent-session can't be used with ${conflicting.map(([, flag]) => flag).join(', ')}`,
+    )
+  const session = detectAgent(process.env)
+  switch (session.kind) {
+    case 'noSession':
+      return fail(
+        `--agent-session needs to run inside a Claude Code or Codex session\n` +
+          `(neither ${CLAUDE_CODE_SOCKET_VAR} nor ${CODEX_THREAD_VAR} is set).`,
+      )
+    case 'ambiguous':
+      return fail(
+        `--agent-session found both ${CLAUDE_CODE_SOCKET_VAR} and ${CODEX_THREAD_VAR},\n` +
+          `so it can't tell which session started skepsis. Use --send with a\n` +
+          `recipe from the README instead.`,
+      )
+    default:
+      return { kind: 'agent', session, replies }
+  }
+}
+
+function commandTarget(): SendTarget | null {
+  // The flag wins over the environment, and an empty value turns sending off.
+  const command = (opts.send ?? process.env['SKEPSIS_SEND']) || null
+  if (opts.replies && !command) fail('--replies needs --send (or SKEPSIS_SEND)')
+  if (!command) return null
+  return { kind: 'command', command, replies: opts.replies ? replies : null }
+}
+
+const send = opts.agentSession ? agentTarget() : commandTarget()
 if (send && !LOOPBACK.has(hostname === '::1' ? '[::1]' : hostname)) {
+  const what =
+    send.kind === 'agent' ? '--agent-session messages the agent' : '--send runs a command'
   fail(
-    `--send runs a command on request from the page, so it needs a loopback\n` +
+    `${what} on request from the page, so it needs a loopback\n` +
       `--host (localhost, 127.0.0.1 or ::1), not ${hostname}.`,
   )
 }
@@ -213,15 +266,7 @@ const { port: apiPort, token } = await startServer({
   hostname,
   port: opts.dev ? undefined : opts.port,
   poll: opts.poll,
-  send: send
-    ? {
-        command: send,
-        // The agent runs this to reply, so it names the same node and script
-        // this run uses: skepsis may not be on its PATH (npx), or may be a
-        // different version.
-        replies: opts.replies ? { skepsis: [process.execPath, process.argv[1]!] } : null,
-      }
-    : null,
+  send,
 }).catch((err: Error) => {
   console.error(err.message)
   return cleanup(1)

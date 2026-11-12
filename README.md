@@ -181,6 +181,24 @@ Viewed state is stored per file in `~/.local/share/skepsis/` using the file's
 content hash (the git object ID from the diff header). If the file changes, the
 hash no longer matches and it automatically shows as unviewed again.
 
+### Reviewing with your coding agent
+
+Ask a Claude Code or Codex session to start skepsis in the background with
+`--agent-session`:
+
+```sh
+npx @oxide/skepsis --agent-session
+```
+
+The comment box then gets a **Send** button that sends the comment to that
+session, and the agent answers in the page, under your comment, where you can
+follow up. skepsis finds the session through the variables the agent sets in
+the commands it runs (`CLAUDE_CODE_MESSAGING_SOCKET` or `CODEX_THREAD_ID`), so
+it has to be the agent that starts it. It is `--send` and `--replies` (below)
+with the delivery built in, and can't be combined with either. When one agent
+runs inside the other, both variables are set and skepsis can't tell which
+session to use, so use `--send` with one of the recipes below instead.
+
 ### Sending comments to another program
 
 `--send <command>` (or `SKEPSIS_SEND` in the environment) adds a **Send** button
@@ -287,13 +305,6 @@ The text can also go after the command as one argument instead of `-`. The
 command names the same node and skepsis this run uses, so it works when
 skepsis isn't on the agent's `PATH`, as with `npx`. In the JSON, `reply` has
 the parts: `server`, `token` and `command` (without the text).
-
-With Claude Code, ask the session to start skepsis in the background with the
-socket recipe above, so that `CLAUDE_CODE_MESSAGING_SOCKET` is set:
-
-```sh
-npx @oxide/skepsis --replies --send 'jq -c "{type:\"user\",message:{role:\"user\",content:.prompt}}" | nc -U "$CLAUDE_CODE_MESSAGING_SOCKET"'
-```
 
 <details>
 <summary>Notes on security</summary>

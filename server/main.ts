@@ -25,6 +25,8 @@ import { getCommentSyntaxes } from './commentSyntax.ts'
 import { loadTheme, saveTheme, themeBootScript } from './settings.ts'
 import { newToken, sendGate, tokenMatches } from './gate.ts'
 import { buildPayload, runSend } from './send.ts'
+import { agentName, sendToAgent } from './agent.ts'
+import type { AgentSession } from './agent.ts'
 import type { SendResult } from './send.ts'
 import { Threads } from './threads.ts'
 
@@ -56,13 +58,14 @@ import type {
   SendRequest,
 } from '../shared/types.ts'
 
-/** What Send runs, and whether the agent at the other end can answer */
-export interface SendTarget {
-  command: string
-  /** With --replies: `skepsis` is how to run this skepsis, e.g.
-   *  [node, /path/to/cli.js], for the reply command each comment carries */
-  replies: { skepsis: readonly string[] } | null
-}
+/** `skepsis` is how to run this skepsis, e.g. [node, /path/to/cli.js], for
+ *  the reply command each comment carries */
+export type Replies = { skepsis: readonly string[] }
+
+/** Where Send delivers, and whether the agent at the other end can answer */
+export type SendTarget =
+  | { kind: 'command'; command: string; replies: Replies | null }
+  | { kind: 'agent'; session: AgentSession; replies: Replies }
 
 export async function startServer(opts: {
   diffSource: DiffSpec
@@ -73,7 +76,7 @@ export async function startServer(opts: {
   poll?: boolean
   /** Unset, /api/send and the thread routes don't exist. */
   send?: SendTarget | null
-  /** Overrides runSend's timeout, for tests */
+  /** Overrides the send timeout, for tests */
   sendTimeoutMs?: number
 }): Promise<{ port: number; token: string; close: () => void }> {
   const { diffSource, port = 0, hostname = 'localhost', cwd, poll = true, send } = opts
@@ -195,9 +198,9 @@ export async function startServer(opts: {
     return c.json({ ok: true } satisfies OkResponse)
   })
 
-  // Send runs the --send command, so only the page may call it (see
-  // gate.ts). Sends run one at a time in arrival order, so two quick ones
-  // can't reach the far end swapped.
+  // Send runs the --send command or messages the agent, so only the page may
+  // call it (see gate.ts). Sends run one at a time in arrival order, so two
+  // quick ones can't reach the far end swapped.
   const threads = new Threads()
   let sendQueue: Promise<SendResult> = Promise.resolve({ ok: true, output: '' })
   if (send) {
@@ -220,7 +223,10 @@ export async function startServer(opts: {
       const payload = buildPayload(diffSource, cwd, comment, thread, replies)
       const run = (): Promise<SendResult> => {
         const env = { SKEPSIS_URL: serverUrl, SKEPSIS_ROOT: cwd }
-        return runSend(send.command, payload, { cwd, env, timeoutMs: opts.sendTimeoutMs })
+        const runOpts = { cwd, env, timeoutMs: opts.sendTimeoutMs }
+        return send.kind === 'command'
+          ? runSend(send.command, payload, runOpts)
+          : sendToAgent(send.session, payload.prompt, runOpts)
       }
       const result = sendQueue.then(run, run)
       sendQueue = result
@@ -366,8 +372,10 @@ export async function startServer(opts: {
       // SKEPSIS_URL point nowhere.
       const host = hostname.includes(':') ? `[${hostname}]` : hostname
       serverUrl = `http://${host}:${assignedPort}`
+      const sendingTo =
+        send?.kind === 'agent' ? `, sending to ${agentName(send.session)}` : ''
       console.info(
-        `skepsis on ${serverUrl}/#token=${token} (${displayCommand(diffSource)})`,
+        `skepsis on ${serverUrl}/#token=${token} (${displayCommand(diffSource)}${sendingTo})`,
       )
       resolve({ port: assignedPort, token, close: () => server.close() })
     })

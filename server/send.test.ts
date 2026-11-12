@@ -7,6 +7,7 @@
  */
 
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -23,6 +24,7 @@ import { isolateVcsConfig } from './testUtil.ts'
 import { buildPayload, renderPrompt, runSend } from './send.ts'
 import type { SendPayload } from './send.ts'
 import type { ReplyToken } from './reply.ts'
+import type { SocketPath } from './agent.ts'
 import type * as DiffModule from './diff.ts'
 
 // getDiff is mocked so the routes don't need a repo.
@@ -280,7 +282,7 @@ describe('/api/send', () => {
     const { port, token, close } = await startServer({
       diffSource: jj,
       cwd: dir,
-      send: command === null ? null : { command, replies: null },
+      send: command === null ? null : { kind: 'command', command, replies: null },
     })
     return { url: `http://localhost:${port}`, token, close }
   }
@@ -401,6 +403,7 @@ describe('threads', () => {
       diffSource: jj,
       cwd: dir,
       send: {
+        kind: 'command',
         command: command ?? `cat >> ${out}`,
         replies: withReplies ? { skepsis: ['skepsis'] } : null,
       },
@@ -548,5 +551,44 @@ describe('threads', () => {
     expect(await listThreads(url, token)).toEqual([])
     expect((await agentReply(url, await replyToken(), 'c1', 'too late')).status).toBe(404)
     close()
+  })
+})
+
+describe('/api/send to an agent session', () => {
+  beforeEach(() => {
+    getDiff.mockReset()
+    getDiff.mockResolvedValue({ patch: '', fileHashes: {} })
+  })
+
+  it('messages the session with replies on', async () => {
+    const socket = join(dir, `cc-${Math.random().toString(36).slice(2)}.sock`) as SocketPath
+    const received: string[] = []
+    const agent = createServer((conn) => {
+      let data = ''
+      conn.on('data', (d: Buffer) => (data += d.toString()))
+      conn.on('end', () => received.push(data))
+    })
+    await new Promise<void>((resolve) => agent.listen(socket, resolve))
+    const { port, token, close } = await startServer({
+      diffSource: jj,
+      cwd: dir,
+      send: {
+        kind: 'agent',
+        session: { kind: 'claudeCode', socket },
+        replies: { skepsis: ['skepsis'] },
+      },
+    })
+    const url = `http://localhost:${port}`
+    expect(await diffSend(url, token)).toEqual({ replies: true })
+    expect((await post(url, token, comment)).status).toBe(200)
+    await expect.poll(() => received.length).toBe(1)
+    const content = (JSON.parse(received[0]!) as { message: { content: string } }).message
+      .content
+    expect(content).toContain('why two?')
+    expect(content).toMatch(
+      /skepsis --reply c1 --server http:\/\/localhost:\d+ --token \S+ -/,
+    )
+    close()
+    agent.close()
   })
 })
